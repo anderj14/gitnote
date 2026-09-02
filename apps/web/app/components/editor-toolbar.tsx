@@ -1,6 +1,8 @@
 "use client";
 
 import type { Editor } from "@tiptap/react";
+import { LinkDialog } from "./link-dialog";
+import { useState } from "react";
 
 type EditorToolbarProps = {
     editor: Editor;
@@ -24,15 +26,13 @@ function ToolbarButton({
             type="button"
             onClick={onClick}
             disabled={disabled}
-            className={`rounded-md px-2.5 py-1.5 text-sm transition ${
-                active
-                    ? "bg-zinc-200 text-zinc-900"
-                    : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
-            } ${
-                disabled
+            className={`rounded-md px-2.5 py-1.5 text-sm transition ${active
+                ? "bg-zinc-200 text-zinc-900"
+                : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
+                } ${disabled
                     ? "cursor-not-allowed opacity-30"
                     : "cursor-pointer"
-            }`}
+                }`}
         >
             {label}
         </button>
@@ -40,6 +40,12 @@ function ToolbarButton({
 }
 
 export function EditorToolbar({ editor }: EditorToolbarProps) {
+    const [linkDialogOpen, setLinkDialogOpen] = useState(false);
+    const [linkSelection, setLinkSelection] = useState<{
+        from: number;
+        to: number;
+    } | null>(null);
+
     return (
         <div className="flex items-center gap-1 border-b border-zinc-200 pb-3">
             <ToolbarButton
@@ -82,6 +88,18 @@ export function EditorToolbar({ editor }: EditorToolbarProps) {
                 }
             />
 
+            <ToolbarButton
+                label="H3"
+                active={editor.isActive("heading", { level: 3 })}
+                onClick={() =>
+                    editor
+                        .chain()
+                        .focus()
+                        .toggleHeading({ level: 3 })
+                        .run()
+                }
+            />
+
             <div className="mx-1 h-5 w-px bg-zinc-200" />
 
             <ToolbarButton
@@ -101,10 +119,60 @@ export function EditorToolbar({ editor }: EditorToolbarProps) {
             />
 
             <ToolbarButton
+                label="Quote"
+                active={editor.isActive("blockquote")}
+                onClick={() =>
+                    editor.chain().focus().toggleBlockquote().run()
+                }
+            />
+
+            <ToolbarButton
+                label="☑"
+                active={editor.isActive("taskList")}
+                onClick={() => editor.commands.toggleTaskList()}
+            />
+
+            <ToolbarButton
+                label="—"
+                onClick={() => editor.commands.setHorizontalRule()}
+            />
+
+            <ToolbarButton
                 label="Code"
                 active={editor.isActive("codeBlock")}
                 onClick={() =>
                     editor.chain().focus().toggleCodeBlock().run()
+                }
+            />
+
+            <ToolbarButton
+                label="Table"
+                onClick={() => {
+                    editor.commands.focus();
+                    editor.commands.insertTable({
+                        rows: 3,
+                        cols: 3,
+                        withHeaderRow: true,
+                    });
+                }}
+            />
+
+            <ToolbarButton
+                label="Link"
+                active={editor.isActive("link")}
+                onClick={() => {
+                    const { from, to } = editor.state.selection;
+
+                    setLinkSelection({ from, to });
+                    setLinkDialogOpen(true);
+                }}
+            />
+
+            <ToolbarButton
+                label="Unlink"
+                disabled={!editor.isActive("link")}
+                onClick={() =>
+                    editor.chain().focus().unsetLink().run()
                 }
             />
 
@@ -124,6 +192,27 @@ export function EditorToolbar({ editor }: EditorToolbarProps) {
                 onClick={() =>
                     editor.chain().focus().redo().run()
                 }
+            />
+
+            <LinkDialog
+                open={linkDialogOpen}
+                initialUrl={
+                    editor.getAttributes("link").href ?? ""
+                }
+                onClose={() => setLinkDialogOpen(false)}
+                onSubmit={(url) => {
+                    if (!linkSelection) {
+                        return;
+                    }
+
+                    editor
+                        .chain()
+                        .setTextSelection(linkSelection)
+                        .setLink({ href: url })
+                        .run();
+
+                    setLinkSelection(null);
+                }}
             />
         </div>
     );

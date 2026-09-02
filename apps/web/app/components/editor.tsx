@@ -5,6 +5,11 @@ import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { useEffect, useState, useRef } from "react";
 import { EditorToolbar } from "./editor-toolbar";
+import Link from "@tiptap/extension-link";
+import Blockquote from "@tiptap/extension-blockquote";
+import { ListKit } from "@tiptap/extension-list";
+import { TableKit } from "@tiptap/extension-table";
+import { TableControls } from "./table-controls";
 
 type EditorProps = {
     title: string;
@@ -21,8 +26,27 @@ export function Editor({ title, content, onTitleChange, onChange }: EditorProps)
         extensions: [
             StarterKit,
             Markdown,
+            Link.configure({
+                openOnClick: false,
+                autolink: true,
+                defaultProtocol: "https",
+            }),
+            Blockquote,
+            ListKit.configure({
+                taskItem: {
+                    nested: true,
+                },
+            }),
+            TableKit.configure({
+                table: {
+                    resizable: true,
+                    cellMinWidth: 80,
+                    lastColumnResizable: true,
+                },
+            }),
         ],
         content,
+        contentType: "markdown",
         immediatelyRender: false,
 
         onUpdate({ editor }) {
@@ -48,7 +72,9 @@ export function Editor({ title, content, onTitleChange, onChange }: EditorProps)
         const currentContent = editor.getMarkdown();
 
         if (currentContent !== content) {
-            editor.commands.setContent(content);
+            editor.commands.setContent(content, {
+                contentType: "markdown",
+            });
         }
     }, [editor, content]);
 
@@ -100,7 +126,10 @@ export function Editor({ title, content, onTitleChange, onChange }: EditorProps)
             </div>
             <EditorToolbar editor={editor} />
             <div className="pt-6">
-                <EditorContent editor={editor} />
+                <div className="relative">
+                    <EditorContent editor={editor} />
+                    <TableControls editor={editor} />
+                </div>
             </div>
         </div>
     );

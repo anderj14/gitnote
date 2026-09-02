@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Sidebar } from "./sidebar";
 import { Editor } from "./editor";
 import type { Folder, Note } from "./types";
@@ -82,6 +82,28 @@ const initialFolders: Folder[] = [
 export function AppShell() {
     const [selectedDocument, setSelectedDocument] = useState<Note | null>(null);
     const [folders, setFolders] = useState<Folder[]>(initialFolders);
+    const [isLoaded, setIsLoaded] = useState(false);
+
+    useEffect(() => {
+        const savedFolders = localStorage.getItem("gitnote-folders");
+
+        if (savedFolders) {
+            setFolders(JSON.parse(savedFolders));
+        }
+        setIsLoaded(true);
+    }, []);
+
+    useEffect(() => {
+        if (!isLoaded) {
+            return;
+        }
+
+        localStorage.setItem(
+            "gitnote-folders",
+            JSON.stringify(folders),
+        );
+    }, [folders]);
+
 
     function handleContentChange(content: string) {
         if (!selectedDocument) {
@@ -131,6 +153,7 @@ export function AppShell() {
         );
     }
 
+
     return (
         <div className="flex min-h-screen bg-white text-zinc-900">
             <Sidebar
@@ -154,6 +177,7 @@ export function AppShell() {
                 <div className="flex min-h-[calc(100vh-3.5rem)] items-center justify-center">
                     {selectedDocument ? (
                         <Editor
+                            key={selectedDocument.id}
                             title={selectedDocument.name}
                             content={selectedDocument.content}
                             onTitleChange={handleNameChange}

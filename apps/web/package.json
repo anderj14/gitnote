@@ -9,6 +9,10 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@tiptap/extension-blockquote": "^3.31.0",
+    "@tiptap/extension-link": "^3.31.0",
+    "@tiptap/extension-list": "^3.31.0",
+    "@tiptap/extension-table": "^3.31.0",
     "@tiptap/markdown": "^3.31.0",
     "@tiptap/pm": "^3.31.0",
     "@tiptap/react": "^3.31.0",
