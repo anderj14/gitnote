@@ -4,6 +4,12 @@ import { useState, useEffect, useRef } from "react";
 import { Sidebar } from "./sidebar";
 import { Editor } from "./editor";
 import { CommitDialog } from "./commit-dialog";
+import { TopBar } from "./top-bar";
+import { SearchCommand } from "./search-command";
+import { NewDocumentModal } from "./new-document-modal";
+import { RightPanel } from "./right-panel";
+import { Toaster } from "sonner";
+import { cn } from "@/app/lib/utils";
 import type { Folder, Note, SaveStatus } from "./types";
 
 const initialFolders: Folder[] = [
@@ -143,6 +149,11 @@ type FileResponse = {
 };
 
 export function AppShell() {
+    const [sidebarOpen, setSidebarOpen] = useState(true);
+    const [searchOpen, setSearchOpen] = useState(false);
+    const [newDocOpen, setNewDocOpen] = useState(false);
+    const [editorTheme, setEditorTheme] = useState<"light" | "dark">("light");
+    const [panelOpen, setPanelOpen] = useState(true);
     const [selectedDocument, setSelectedDocument] = useState<Note | null>(null);
     const [folders, setFolders] = useState<Folder[]>(getInitialFolders);
     const [rootDocuments, setRootDocuments] = useState<Note[]>([]);
@@ -162,6 +173,7 @@ export function AppShell() {
     const [commitDialogOpen, setCommitDialogOpen] = useState(false);
     const [commitError, setCommitError] = useState<string | null>(null);
     const [commitMessage, setCommitMessage] = useState("");
+    const [headings, setHeadings] = useState<{ id: string; text: string; level: number }[]>([]);
 
     // Keep ref in sync for stable comparison in callbacks without re-renders
     useEffect(() => {
@@ -199,6 +211,28 @@ export function AppShell() {
 
                 if (!cancelled) {
                     setRepositories(repositoriesData.repositories);
+
+                    // Restore last selected repo (cross-device via Supabase, fallback localStorage)
+                    try {
+                        const prefRes = await fetch("/api/github/selected-repo");
+                        const prefData = (await prefRes.json()) as { preference?: { owner: string; repo: string; branch: string } | null; configured?: boolean };
+                        const pref = prefData.preference;
+                        // Fallback to localStorage when Supabase not configured
+                        const localPref = (() => {
+                            try {
+                                const raw = localStorage.getItem("gitnote:selectedRepo");
+                                return raw ? (JSON.parse(raw) as { owner: string; repo: string; branch: string }) : null;
+                            } catch { return null; }
+                        })();
+                        const target = pref ?? localPref;
+                        if (target) {
+                            const match = repositoriesData.repositories.find((r: GitHubRepository) => r.owner === target.owner && r.name === target.repo);
+                            if (match && !cancelled) {
+                                // Defer tree load to next tick to avoid setState during current effect
+                                setTimeout(() => void handleSelectRepository(match), 0);
+                            }
+                        }
+                    } catch { /* ignore preference load errors */ }
                 }
             } catch {
                 if (!cancelled) {
@@ -228,6 +262,20 @@ export function AppShell() {
             JSON.stringify(folders),
         );
     }, [account, folders]);
+
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            const mod = e.metaKey || e.ctrlKey;
+            if (!mod) return;
+            if (e.key.toLowerCase() === "k") { e.preventDefault(); setSearchOpen(true); }
+            else if (e.key.toLowerCase() === "n") { e.preventDefault(); setNewDocOpen(true); }
+            else if (e.key.toLowerCase() === "b") { e.preventDefault(); setSidebarOpen((v) => !v); }
+            else if (e.key === ".") { e.preventDefault(); setPanelOpen((v) => !v); }
+            else if (e.key.toLowerCase() === "l" && e.shiftKey) { e.preventDefault(); setEditorTheme((t) => (t === "light" ? "dark" : "light")); }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, []);
 
 
     function handleContentChange(content: string) {
@@ -273,6 +321,29 @@ export function AppShell() {
         }
         // For GitHub docs, name is filename — renaming not committed via updateFile.
         // We intentionally don't flip saveStatus for name alone (commit is for markdown content).
+    }
+
+    function handleCreateDocument(note: Note) {
+        // If repo connected, we'd need to commit new file via GitHub API; for now treat as local until saved
+        // Insert into appropriate folder or root
+        const path = note.path;
+        const folderPath = path.includes("/") ? path.split("/").slice(0, -1).join("/") : null;
+
+        if (!folderPath) {
+            setRootDocuments((prev) => [...prev, note].sort((a, b) => a.name.localeCompare(b.name)));
+        } else {
+            // Try to insert into existing folder tree, else create top-level folder
+            setFolders((prev) => {
+                const found = insertIntoFolderTree(prev, folderPath, note);
+                if (found) return found;
+                // Create new folder at top level
+                const newFolder: Folder = { id: `local-folder:${folderPath}`, name: folderPath.split("/").pop() ?? folderPath, documents: [note], folders: [] };
+                return [...prev, newFolder].sort((a, b) => a.name.localeCompare(b.name));
+            });
+        }
+        setSelectedDocument(note);
+        setLastSavedContent(note.content);
+        setSaveStatus("saved");
     }
 
     // Save → Commit dialog
@@ -372,6 +443,9 @@ export function AppShell() {
         setGithubError(null);
         setSaveStatus("saved");
         setLastSavedContent("");
+        // Persist selection cross-device (Supabase) + fallback localStorage
+        try { localStorage.setItem("gitnote:selectedRepo", JSON.stringify({ owner: repository.owner, repo: repository.name, branch: repository.defaultBranch })); } catch {}
+        void fetch("/api/github/selected-repo", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ owner: repository.owner, repo: repository.name, branch: repository.defaultBranch }) }).catch(() => {});
 
         const params = new URLSearchParams({
             owner: repository.owner,
@@ -450,6 +524,9 @@ export function AppShell() {
 
     async function handleLogout() {
         await fetch("/api/github/logout", { method: "POST" });
+        // Keep preference for next login (cross-device) - only clear local if you want truly fresh
+        // To clear cross-device too, uncomment: await fetch("/api/github/selected-repo", { method: "DELETE" }).catch(()=>{});
+        try { localStorage.removeItem("gitnote:selectedRepo"); } catch {}
         setAccount(null);
         setRepositories([]);
         setSelectedRepository(null);
@@ -480,81 +557,65 @@ export function AppShell() {
         !!selectedDocument &&
         selectedDocument.content !== lastSavedContent;
 
+    const breadcrumbs = selectedDocument
+        ? [selectedRepository?.name ?? workspaceLabel, selectedDocument.name]
+        : selectedRepository
+            ? [workspaceLabel, selectedRepository.name]
+            : [workspaceLabel];
+
+    const gitStatus: "Synced" | "Modified" | "Untracked" =
+        saveStatus === "unsaved" || saveStatus === "error" ? "Modified" : saveStatus === "saving" ? "Modified" : "Synced";
+
     return (
-        <div className="flex min-h-screen bg-white text-zinc-900">
-            <Sidebar
-                folders={folders}
-                documents={rootDocuments}
-                selectedDocumentId={selectedDocument?.id ?? null}
-                workspaceLabel={workspaceLabel}
-                status={sidebarStatus}
-                action={
-                    account ? (
-                        <button
-                            type="button"
-                            onClick={handleLogout}
-                            className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900"
-                        >
-                            Logout
-                        </button>
-                    ) : (
-                        <a
-                            href="/api/github/login"
-                            className="rounded-md bg-zinc-900 px-2 py-1 text-xs font-medium text-white hover:bg-zinc-700"
-                        >
-                            GitHub
-                        </a>
-                    )
-                }
-                onSelectDocument={(document) => {
-                    void handleSelectDocument(document);
-                }}
-            />
-
-            <main className="min-w-0 flex-1">
-                <div className="flex h-14 items-center justify-between gap-4 border-b border-zinc-200 px-6">
-                    {selectedDocument ? (
-                        <div className="min-w-0">
-                            <span className="block truncate text-sm font-medium">
-                                {selectedDocument.name}
-                            </span>
-                            {selectedDocument.source && (
-                                <span className="block truncate text-xs text-zinc-500">
-                                    {selectedDocument.source.owner}/{selectedDocument.source.repo}:{selectedDocument.source.path}
-                                </span>
-                            )}
-                        </div>
-                    ) : selectedRepository ? (
-                        <span className="text-sm font-medium">
-                            {selectedRepository.fullName}
-                        </span>
-                    ) : (
-                        <span className="text-sm text-zinc-500">
-                            No document selected
-                        </span>
-                    )}
-
-                    {account && (
-                        <span className="shrink-0 text-sm text-zinc-500">
-                            Connected as @{account.login}
-                        </span>
-                    )}
+        <div className="flex h-screen w-full overflow-hidden bg-background">
+            <aside className={cn("shrink-0 overflow-hidden border-r border-chrome-border transition-[width] duration-200", sidebarOpen ? "w-[264px]" : "w-0 border-r-0")}>
+                <div className="h-full w-[264px]">
+                    <Sidebar
+                        folders={folders}
+                        documents={rootDocuments}
+                        selectedDocumentId={selectedDocument?.id ?? null}
+                        workspaceLabel={workspaceLabel}
+                        status={sidebarStatus}
+                        repoName={selectedRepository?.name ?? null}
+                        repoBranch={selectedRepository?.defaultBranch ?? null}
+                        action={
+                            account ? (
+                                <button type="button" onClick={handleLogout} className="rounded-md px-2 py-1 text-xs text-chrome-muted hover:bg-chrome-hover hover:text-chrome-foreground">
+                                    Logout
+                                </button>
+                            ) : (
+                                <a href="/api/github/login" className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90">
+                                    GitHub
+                                </a>
+                            )
+                        }
+                        onSelectDocument={(document) => { void handleSelectDocument(document); }}
+                        onNewDocument={() => setNewDocOpen(true)}
+                    />
                 </div>
+            </aside>
 
-                <div className="flex min-h-[calc(100vh-3.5rem)] items-center justify-center">
+            <div className="flex min-w-0 flex-1 flex-col">
+                <TopBar breadcrumbs={breadcrumbs} status={gitStatus} onToggleSidebar={() => setSidebarOpen((v) => !v)} onTogglePanel={() => setPanelOpen((v) => !v)} onSearch={() => setSearchOpen(true)} accountLogin={account?.login ?? null} />
+
+                <div className={cn("flex min-h-0 flex-1", selectedDocument ? "bg-editor" : "bg-background")}>
+                    <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                        <div className={cn("flex flex-1 flex-col", selectedDocument ? "overflow-hidden" : "overflow-y-auto")}>
                     {documentLoading ? (
-                        <p className="text-sm text-zinc-500">Loading document...</p>
+                        <div className="flex flex-1 items-center justify-center"><p className="text-sm text-chrome-muted">Loading document…</p></div>
                     ) : selectedDocument ? (
-                        <>
+                        <div className="flex h-full w-full flex-1">
                             <Editor
                                 key={selectedDocument.id}
                                 title={selectedDocument.name}
                                 content={selectedDocument.content}
                                 saveStatus={saveStatus}
                                 canSave={canSave}
+                                theme={editorTheme}
                                 onTitleChange={handleNameChange}
                                 onChange={handleContentChange}
                                 onSave={handleSaveClick}
+                                onHeadingsChange={setHeadings}
                             />
                             <CommitDialog
                                 open={commitDialogOpen}
@@ -563,52 +624,57 @@ export function AppShell() {
                                 onMessageChange={setCommitMessage}
                                 saving={saveStatus === "saving"}
                                 error={commitError}
-                                onClose={() => {
-                                    if (saveStatus !== "saving") {
-                                        setCommitDialogOpen(false);
-                                        setCommitError(null);
-                                    }
-                                }}
+                                onClose={() => { if (saveStatus !== "saving") { setCommitDialogOpen(false); setCommitError(null); } }}
                                 onCommit={(msg) => void handleCommit(msg)}
                             />
                             {saveStatus === "error" && !commitDialogOpen && commitError && (
-                                <div className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2 rounded-md bg-red-600 px-4 py-2 text-sm text-white shadow-lg">
+                                <div className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2 rounded-md bg-destructive px-4 py-2 text-sm text-destructive-foreground shadow-float">
                                     {commitError}
                                 </div>
                             )}
-                        </>
+                        </div>
                     ) : account ? (
-                        <GitHubRepositorySelection
-                            account={account}
-                            repositories={repositories}
-                            selectedRepository={selectedRepository}
-                            installUrl={githubInstallUrl}
-                            loading={repositoriesLoading}
-                            error={githubError}
-                            onRetry={() => {
-                                window.location.reload();
-                            }}
-                            onSelectRepository={(repository) => {
-                                void handleSelectRepository(repository);
-                            }}
-                        />
+                        <div className="scroll-thin flex flex-1 justify-center overflow-y-auto">
+                            <GitHubRepositorySelection
+                                account={account}
+                                repositories={repositories}
+                                selectedRepository={selectedRepository}
+                                installUrl={githubInstallUrl}
+                                loading={repositoriesLoading}
+                                error={githubError}
+                                onRetry={() => window.location.reload()}
+                                onSelectRepository={(repository) => { void handleSelectRepository(repository); }}
+                            />
+                        </div>
                     ) : (
-                        <div className="text-center">
-                            <h1 className="text-2xl font-semibold tracking-tight">
-                                Welcome to GitNote
-                            </h1>
-
-                            <p className="mt-2 text-sm text-zinc-500">
-                                Select a document or create a new one.
-                            </p>
-
-                            {githubError && (
-                                <p className="mt-4 text-sm text-red-600">{githubError}</p>
-                            )}
+                        <div className="flex flex-1 items-center justify-center">
+                        <div className="mx-auto flex w-full max-w-3xl flex-col items-center justify-center px-6 py-16 text-center">
+                            <h1 className="font-display text-3xl font-semibold tracking-tight">Good afternoon.</h1>
+                            <p className="mt-1.5 text-[14px] text-muted-foreground">Continue where you left off — connect GitHub to sync your Markdown workspace.</p>
+                            <div className="mt-8 flex gap-3">
+                                <a href="/api/github/login" className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">Connect GitHub</a>
+                            </div>
+                            {githubError && <p className="mt-4 text-sm text-destructive">{githubError}</p>}
+                            <div className="mt-12 grid w-full grid-cols-3 gap-3 text-left">
+                                <div className="rounded-xl border border-border bg-card px-4 py-3.5 shadow-panel"><p className="font-display text-xl font-semibold">{folders.length}</p><p className="text-[12px] text-muted-foreground">Folders</p></div>
+                                <div className="rounded-xl border border-border bg-card px-4 py-3.5 shadow-panel"><p className="font-display text-xl font-semibold">{rootDocuments.length + folders.reduce((a,f)=>a+f.documents.length,0)}</p><p className="text-[12px] text-muted-foreground">Documents</p></div>
+                                <div className="rounded-xl border border-border bg-card px-4 py-3.5 shadow-panel"><p className="font-display text-xl font-semibold">1</p><p className="text-[12px] text-muted-foreground">Workspace</p></div>
+                            </div>
+                        </div>
+                        </div>
+                    )}
+                        </div>
+                    </main>
+                    {selectedDocument && panelOpen && (
+                        <div className="hidden lg:flex">
+                            <RightPanel doc={selectedDocument} headings={headings} theme={editorTheme} onToggleTheme={() => setEditorTheme((t) => (t === "light" ? "dark" : "light"))} onClose={() => setPanelOpen(false)} />
                         </div>
                     )}
                 </div>
-            </main>
+            </div>
+            <SearchCommand open={searchOpen} onOpenChange={setSearchOpen} folders={folders} documents={rootDocuments} onSelectDocument={(d) => void handleSelectDocument(d)} onNewDocument={() => setNewDocOpen(true)} onToggleSidebar={() => setSidebarOpen((v) => !v)} />
+            <NewDocumentModal open={newDocOpen} onOpenChange={setNewDocOpen} folders={folders} documents={rootDocuments} onCreate={handleCreateDocument} repoConnected={!!selectedRepository} />
+            <Toaster richColors position="top-right" />
         </div>
     );
 }
@@ -671,97 +737,45 @@ function GitHubRepositorySelection({
     return (
         <div className="w-full max-w-3xl px-8 py-10">
             <div>
-                <p className="text-sm font-medium text-zinc-500">GitHub</p>
-                <h1 className="mt-2 text-2xl font-semibold tracking-tight">
-                    Connected as @{account.login}
-                </h1>
-                <p className="mt-2 text-sm text-zinc-500">
-                    Elige un repo para usar como workspace o crea uno nuevo — como en Notion, cada repo es un workspace.
-                </p>
+                <p className="label-caps text-muted-foreground">GitHub</p>
+                <h1 className="mt-2 font-display text-2xl font-semibold tracking-tight">Connected as @{account.login}</h1>
+                <p className="mt-2 text-sm text-muted-foreground">Elige un repo para usar como workspace o crea uno nuevo — como en Notion, cada repo es un workspace.</p>
             </div>
 
-            <div className="mt-8 rounded-lg border border-zinc-200 bg-zinc-50 p-4">
-                <h3 className="text-sm font-medium text-zinc-900">Crear nuevo workspace</h3>
-                <p className="mt-1 text-xs text-zinc-500">Se creará un repositorio privado con README inicial.</p>
+            <div className="mt-8 rounded-xl border border-border bg-card p-5 shadow-panel">
+                <h3 className="text-sm font-medium">Crear nuevo workspace</h3>
+                <p className="mt-1 text-xs text-muted-foreground">Se creará un repositorio privado con README inicial.</p>
                 <div className="mt-3 flex gap-2">
-                    <input
-                        value={newRepoName}
-                        onChange={(e) => setNewRepoName(e.target.value)}
-                        placeholder="mi-workspace"
-                        className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm outline-none focus:border-zinc-900 focus:ring-1 focus:ring-zinc-900"
-                    />
-                    <button
-                        type="button"
-                        onClick={() => void handleCreateRepository()}
-                        disabled={creating || !newRepoName.trim()}
-                        className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50"
-                    >
-                        {creating ? "Creando..." : "Crear"}
+                    <input value={newRepoName} onChange={(e) => setNewRepoName(e.target.value)} placeholder="mi-workspace" className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+                    <button type="button" onClick={() => void handleCreateRepository()} disabled={creating || !newRepoName.trim()} className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
+                        {creating ? "Creando…" : "Crear"}
                     </button>
                 </div>
-                {createError && <p className="mt-2 text-sm text-red-600">{createError}</p>}
+                {createError && <p className="mt-2 text-sm text-destructive">{createError}</p>}
             </div>
 
             <div className="mt-8">
-                <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
-                    Repositories
-                </h2>
-
-                {loading && (
-                    <p className="mt-4 text-sm text-zinc-500">Loading repositories...</p>
-                )}
-
+                <h2 className="label-caps text-muted-foreground">Repositories</h2>
+                {loading && <p className="mt-4 text-sm text-muted-foreground">Loading repositories…</p>}
                 {error && (
                     <div className="mt-4">
-                        <p className="text-sm text-red-600">{error}</p>
-                        <button
-                            type="button"
-                            onClick={onRetry}
-                            className="mt-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-100"
-                        >
-                            Try again.
-                        </button>
+                        <p className="text-sm text-destructive">{error}</p>
+                        <button type="button" onClick={onRetry} className="mt-2 rounded-md border border-input px-3 py-1.5 text-sm hover:bg-accent">Try again.</button>
                     </div>
                 )}
-
                 {!loading && !error && displayRepos.length === 0 && (
                     <div className="mt-4">
-                        <p className="text-sm text-zinc-500">No repositories found. Crea tu primer workspace arriba.</p>
-                        {installUrl && (
-                            <a
-                                href={installUrl}
-                                className="mt-3 inline-flex rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100"
-                            >
-                                O instalar GitHub App
-                            </a>
-                        )}
+                        <p className="text-sm text-muted-foreground">No repositories found. Crea tu primer workspace arriba.</p>
+                        {installUrl && <a href={installUrl} className="mt-3 inline-flex rounded-md border border-input bg-background px-3 py-2 text-sm font-medium hover:bg-accent">O instalar GitHub App</a>}
                     </div>
                 )}
-
                 <div className="mt-4 grid gap-3">
                     {displayRepos.map((repository) => {
                         const selected = selectedRepository?.id === repository.id;
-
                         return (
-                            <button
-                                key={repository.id}
-                                type="button"
-                                onClick={() => onSelectRepository(repository)}
-                                className={`rounded-lg border p-4 text-left transition hover:border-zinc-400 hover:bg-zinc-50 ${selected
-                                    ? "border-zinc-900 bg-zinc-50"
-                                    : "border-zinc-200"
-                                    }`}
-                            >
-                                <span className="block text-sm font-medium text-zinc-900">
-                                    {repository.name}
-                                </span>
-                                <span className="mt-1 block text-sm text-zinc-500">
-                                    {repository.private ? "Private" : "Public"}
-                                    {" · "}
-                                    {repository.defaultBranch}
-                                    {" · "}
-                                    {repository.fullName}
-                                </span>
+                            <button key={repository.id} type="button" onClick={() => onSelectRepository(repository)} className={`rounded-xl border p-4 text-left shadow-panel transition hover:bg-accent ${selected ? "border-primary bg-accent" : "border-border bg-card"}`}>
+                                <span className="block text-sm font-medium">{repository.name}</span>
+                                <span className="mt-1 block font-mono text-xs text-muted-foreground">{repository.private ? "Private" : "Public"} · {repository.defaultBranch} · {repository.fullName}</span>
                             </button>
                         );
                     })}
@@ -781,6 +795,32 @@ function updateDocumentInFolders(folders: Folder[], updatedDocument: Note): Fold
             ? updateDocumentInFolders(folder.folders, updatedDocument)
             : undefined,
     }));
+}
+
+function insertIntoFolderTree(folders: Folder[], folderPath: string, note: Note): Folder[] | null {
+    // Returns new tree if inserted, null if folderPath not found
+    let inserted = false;
+    const next = folders.map((f) => {
+        const currentPath = f.name;
+        // For simplicity, match by folder name or by id suffix; we treat top-level name as path segment
+        // Recurse if folderPath starts with this folder's name
+        if (folderPath === f.name || folderPath.startsWith(f.name + "/")) {
+            const remainder = folderPath === f.name ? "" : folderPath.slice(f.name.length + 1);
+            if (!remainder) {
+                inserted = true;
+                return { ...f, documents: [...f.documents, note].sort((a, b) => a.name.localeCompare(b.name)) };
+            }
+            if (f.folders) {
+                const sub = insertIntoFolderTree(f.folders, remainder, note);
+                if (sub) {
+                    inserted = true;
+                    return { ...f, folders: sub };
+                }
+            }
+        }
+        return f;
+    });
+    return inserted ? next : null;
 }
 
 function buildRepositoryDocuments(
