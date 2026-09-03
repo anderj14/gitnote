@@ -47,14 +47,14 @@ export function EditorToolbar({ editor }: EditorToolbarProps) {
     } | null>(null);
 
     return (
-        <div className="flex items-center gap-1 border-b border-zinc-200 pb-3">
-            <ToolbarButton
-                label="B"
-                active={editor.isActive("bold")}
-                onClick={() =>
-                    editor.chain().focus().toggleBold().run()
-                }
-            />
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-zinc-200 pb-3">
+        <ToolbarButton
+            label="B"
+            active={editor.isActive("bold")}
+            onClick={() =>
+                editor.chain().focus().toggleBold().run()
+            }
+        />
 
             <ToolbarButton
                 label="I"

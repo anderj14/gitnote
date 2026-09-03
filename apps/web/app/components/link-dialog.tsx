@@ -1,7 +1,5 @@
 "use client";
 
-import { useEffect, useState } from "react";
-
 type LinkDialogProps = {
     open: boolean;
     initialUrl?: string;
@@ -15,14 +13,6 @@ export function LinkDialog({
     onClose,
     onSubmit,
 }: LinkDialogProps) {
-    const [url, setUrl] = useState(initialUrl);
-
-    useEffect(() => {
-        if (open) {
-            setUrl(initialUrl);
-        }
-    }, [open, initialUrl]);
-
     if (!open) {
         return null;
     }
@@ -30,7 +20,8 @@ export function LinkDialog({
     function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
         event.preventDefault();
 
-        const value = url.trim();
+        const formData = new FormData(event.currentTarget);
+        const value = String(formData.get("url") ?? "").trim();
 
         if (!value) {
             return;
@@ -56,9 +47,9 @@ export function LinkDialog({
 
                 <input
                     autoFocus
+                    name="url"
                     type="url"
-                    value={url}
-                    onChange={(event) => setUrl(event.target.value)}
+                    defaultValue={initialUrl}
                     placeholder="https://example.com"
                     className="mt-4 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500"
                 />

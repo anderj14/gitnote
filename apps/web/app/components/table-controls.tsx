@@ -106,33 +106,35 @@ export function TableControls({ editor }: TableControlsProps) {
         return null;
     }
 
+    const activeEditor = editor;
+    const activePosition = position;
     const cellRect = position.cell.getBoundingClientRect();
     const tableRect = position.table.getBoundingClientRect();
 
     function selectCell() {
-        const pos = editor.view.posAtDOM(position.cell, 0);
+        const pos = activeEditor.view.posAtDOM(activePosition.cell, 0);
 
-        editor.commands.setTextSelection(pos);
+        activeEditor.commands.setTextSelection(pos);
     }
 
     function addColumn() {
         selectCell();
-        editor.commands.addColumnAfter();
+        activeEditor.commands.addColumnAfter();
     }
 
     function deleteColumn() {
         selectCell();
-        editor.commands.deleteColumn();
+        activeEditor.commands.deleteColumn();
     }
 
     function addRow() {
         selectCell();
-        editor.commands.addRowAfter();
+        activeEditor.commands.addRowAfter();
     }
 
     function deleteRow() {
         selectCell();
-        editor.commands.deleteRow();
+        activeEditor.commands.deleteRow();
     }
 
     const buttonClass =

@@ -1,9 +1,10 @@
 "use client"
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Sidebar } from "./sidebar";
 import { Editor } from "./editor";
-import type { Folder, Note } from "./types";
+import { CommitDialog } from "./commit-dialog";
+import type { Folder, Note, SaveStatus } from "./types";
 
 const initialFolders: Folder[] = [
     {
@@ -78,23 +79,147 @@ const initialFolders: Folder[] = [
     },
 ];
 
+type GitHubAccount = {
+    id: number;
+    login: string;
+    name: string | null;
+    avatarUrl: string;
+};
+
+type GitHubRepository = {
+    id: number;
+    name: string;
+    fullName: string;
+    owner: string;
+    private: boolean;
+    defaultBranch: string;
+    description: string | null;
+};
+
+type GitHubMarkdownFile = {
+    name: string;
+    path: string;
+    sha: string;
+    size?: number;
+};
+
+type GitHubRepositoryTree = {
+    folders: string[];
+    files: GitHubMarkdownFile[];
+};
+
+type RepositoryDocuments = {
+    folders: Folder[];
+    documents: Note[];
+};
+
+type SessionResponse =
+    | {
+        connected: true;
+        account: GitHubAccount;
+        installUrl: string | null;
+    }
+    | {
+        connected: false;
+        error?: string;
+        installUrl?: string | null;
+    };
+
+type RepositoriesResponse = {
+    repositories: GitHubRepository[];
+};
+
+type TreeResponse = {
+    tree: GitHubRepositoryTree;
+};
+
+type FileResponse = {
+    file: {
+        path: string;
+        name: string;
+        content: string;
+        sha: string;
+    };
+};
 
 export function AppShell() {
     const [selectedDocument, setSelectedDocument] = useState<Note | null>(null);
-    const [folders, setFolders] = useState<Folder[]>(initialFolders);
-    const [isLoaded, setIsLoaded] = useState(false);
+    const [folders, setFolders] = useState<Folder[]>(getInitialFolders);
+    const [rootDocuments, setRootDocuments] = useState<Note[]>([]);
+    const [account, setAccount] = useState<GitHubAccount | null>(null);
+    const [repositories, setRepositories] = useState<GitHubRepository[]>([]);
+    const [selectedRepository, setSelectedRepository] = useState<GitHubRepository | null>(null);
+    const [repositoriesLoading, setRepositoriesLoading] = useState(false);
+    const [treeLoading, setTreeLoading] = useState(false);
+    const [documentLoading, setDocumentLoading] = useState(false);
+    const [githubError, setGithubError] = useState<string | null>(null);
+    const [githubInstallUrl, setGithubInstallUrl] = useState<string | null>(null);
+
+    // Save flow state (spec: saved | unsaved | saving | error)
+    const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved");
+    const [lastSavedContent, setLastSavedContent] = useState<string>("");
+    const lastSavedContentRef = useRef<string>("");
+    const [commitDialogOpen, setCommitDialogOpen] = useState(false);
+    const [commitError, setCommitError] = useState<string | null>(null);
+    const [commitMessage, setCommitMessage] = useState("");
+
+    // Keep ref in sync for stable comparison in callbacks without re-renders
+    useEffect(() => {
+        lastSavedContentRef.current = lastSavedContent;
+    }, [lastSavedContent]);
 
     useEffect(() => {
-        const savedFolders = localStorage.getItem("gitnote-folders");
+        let cancelled = false;
 
-        if (savedFolders) {
-            setFolders(JSON.parse(savedFolders));
+        async function loadSession() {
+            try {
+                const response = await fetch("/api/github/session");
+                const data = (await response.json()) as unknown;
+
+                if (!isSessionResponse(data) || !data.connected || cancelled) {
+                    if (isSessionResponse(data) && !cancelled) {
+                        setGithubInstallUrl(data.installUrl ?? null);
+                    }
+                    return;
+                }
+
+                setAccount(data.account);
+                setGithubInstallUrl(data.installUrl);
+                setFolders([]);
+                setRootDocuments([]);
+                setRepositoriesLoading(true);
+                setGithubError(null);
+
+                const repositoriesResponse = await fetch("/api/github/repositories");
+                const repositoriesData = (await repositoriesResponse.json()) as unknown;
+
+                if (!repositoriesResponse.ok || !isRepositoriesResponse(repositoriesData)) {
+                    throw new Error("Unable to load repositories.");
+                }
+
+                if (!cancelled) {
+                    setRepositories(repositoriesData.repositories);
+                }
+            } catch {
+                if (!cancelled) {
+                    setGithubError("Unable to load repositories.");
+                }
+            } finally {
+                if (!cancelled) {
+                    setRepositoriesLoading(false);
+                }
+            }
         }
-        setIsLoaded(true);
+
+        void loadSession();
+
+        return () => {
+            cancelled = true;
+        };
     }, []);
 
     useEffect(() => {
-        if (!isLoaded) {
+        if (account) {
             return;
         }
 
@@ -102,7 +227,7 @@ export function AppShell() {
             "gitnote-folders",
             JSON.stringify(folders),
         );
-    }, [folders]);
+    }, [account, folders]);
 
 
     function handleContentChange(content: string) {
@@ -117,16 +242,18 @@ export function AppShell() {
 
         setSelectedDocument(updatedDocument);
 
-        setFolders((currentFolders) =>
-            currentFolders.map((folder) => ({
-                ...folder,
-                documents: folder.documents.map((note) =>
-                    note.id === updatedDocument.id
-                        ? updatedDocument
-                        : note,
-                ),
-            })),
-        );
+        // Local docs: persist in folders (no GitHub save)
+        if (!selectedDocument.source) {
+            setFolders((currentFolders) => updateDocumentInFolders(currentFolders, updatedDocument));
+            return;
+        }
+
+        // GitHub docs: track unsaved vs saved
+        if (content === lastSavedContentRef.current) {
+            setSaveStatus("saved");
+        } else {
+            setSaveStatus("unsaved");
+        }
     }
 
     function handleNameChange(name: string) {
@@ -141,47 +268,329 @@ export function AppShell() {
 
         setSelectedDocument(updatedDocument);
 
-        setFolders((currentFolders) =>
-            currentFolders.map((folder) => ({
-                ...folder,
-                documents: folder.documents.map((note) =>
-                    note.id === updatedDocument.id
-                        ? updatedDocument
-                        : note,
-                ),
-            })),
-        );
+        if (!selectedDocument.source) {
+            setFolders((currentFolders) => updateDocumentInFolders(currentFolders, updatedDocument));
+        }
+        // For GitHub docs, name is filename — renaming not committed via updateFile.
+        // We intentionally don't flip saveStatus for name alone (commit is for markdown content).
     }
 
+    // Save → Commit dialog
+    function handleSaveClick() {
+        if (!selectedDocument?.source) return;
+        if (saveStatus === "saved" || saveStatus === "saving") return;
+        // Avoid unnecessary commits
+        if (selectedDocument.content === lastSavedContent) {
+            setSaveStatus("saved");
+            return;
+        }
+        setCommitError(null);
+        setCommitMessage(`Update ${selectedDocument.name}`);
+        setCommitDialogOpen(true);
+    }
+
+    async function handleCommit(commitMessageParam: string) {
+        if (!selectedDocument?.source) return;
+        const trimmed = commitMessageParam.trim();
+        if (!trimmed) {
+            setCommitError("Commit message is required.");
+            return;
+        }
+        if (saveStatus === "saving") return;
+        // Avoid commit if no changes
+        if (selectedDocument.content === lastSavedContent) {
+            setCommitDialogOpen(false);
+            setSaveStatus("saved");
+            return;
+        }
+
+        setSaveStatus("saving");
+        setCommitError(null);
+
+        try {
+            const response = await fetch("/api/github/file", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    owner: selectedDocument.source.owner,
+                    repo: selectedDocument.source.repo,
+                    path: selectedDocument.source.path,
+                    branch: selectedDocument.source.branch,
+                    sha: selectedDocument.source.sha,
+                    content: selectedDocument.content,
+                    message: trimmed,
+                }),
+            });
+
+            const data = (await response.json().catch(() => ({}))) as { error?: string; file?: { sha: string; path: string } };
+
+            if (!response.ok || !data.file) {
+                const friendly =
+                    data.error ??
+                    (response.status === 409
+                        ? "This file changed on GitHub. Reload the file before saving again."
+                        : response.status === 401 || response.status === 403
+                            ? "You don't have permission to modify this file."
+                            : response.status >= 500
+                                ? "Unable to connect to GitHub."
+                                : "Unable to save changes. Please try again.");
+                throw new Error(friendly);
+            }
+
+            // Success: update sha and mark saved
+            const newSha = data.file.sha;
+            setLastSavedContent(selectedDocument.content);
+            setSelectedDocument((prev) =>
+                prev && prev.source
+                    ? { ...prev, source: { ...prev.source, sha: newSha } }
+                    : prev,
+            );
+            setSaveStatus("saved");
+            setCommitDialogOpen(false);
+            setGithubError(null);
+            // Tree remains consistent — file path unchanged
+        } catch (err) {
+            console.error("Save failed:", err);
+            const message =
+                err instanceof Error ? err.message : "Unable to save changes. Please try again.";
+            // Map network errors
+            if (message.includes("Failed to fetch") || message.includes("NetworkError")) {
+                setCommitError("Unable to connect to GitHub.");
+            } else {
+                setCommitError(message);
+            }
+            setSaveStatus("error");
+        }
+    }
+
+    async function handleSelectRepository(repository: GitHubRepository) {
+        setSelectedRepository(repository);
+        setSelectedDocument(null);
+        setFolders([]);
+        setRootDocuments([]);
+        setTreeLoading(true);
+        setGithubError(null);
+        setSaveStatus("saved");
+        setLastSavedContent("");
+
+        const params = new URLSearchParams({
+            owner: repository.owner,
+            repo: repository.name,
+            branch: repository.defaultBranch,
+        });
+
+        try {
+            const response = await fetch(`/api/github/tree?${params.toString()}`);
+            const data = (await response.json()) as unknown;
+
+            if (!response.ok || !isTreeResponse(data)) {
+                throw new Error("Unable to load repository files.");
+            }
+
+            const documents = buildRepositoryDocuments(repository, data.tree);
+
+            setFolders(documents.folders);
+            setRootDocuments(documents.documents);
+        } catch {
+            setGithubError("Unable to load repository files.");
+        } finally {
+            setTreeLoading(false);
+        }
+    }
+
+    async function handleSelectDocument(document: Note) {
+        if (!document.source) {
+            setSelectedDocument(document);
+            setLastSavedContent(document.content);
+            setSaveStatus("saved");
+            setCommitDialogOpen(false);
+            setCommitError(null);
+            return;
+        }
+
+        setDocumentLoading(true);
+        setGithubError(null);
+        setSaveStatus("saved");
+
+        const params = new URLSearchParams({
+            owner: document.source.owner,
+            repo: document.source.repo,
+            path: document.source.path,
+            ref: document.source.branch,
+        });
+
+        try {
+            const response = await fetch(`/api/github/file?${params.toString()}`);
+            const data = (await response.json()) as unknown;
+
+            if (!response.ok || !isFileResponse(data)) {
+                throw new Error("Unable to load document.");
+            }
+
+            const file = data.file;
+            setLastSavedContent(file.content);
+            setSaveStatus("saved");
+            setCommitDialogOpen(false);
+            setCommitError(null);
+            setSelectedDocument({
+                ...document,
+                name: file.name,
+                content: file.content,
+                source: {
+                    ...document.source,
+                    sha: file.sha,
+                },
+            });
+        } catch {
+            setGithubError("Unable to load document.");
+        } finally {
+            setDocumentLoading(false);
+        }
+    }
+
+    async function handleLogout() {
+        await fetch("/api/github/logout", { method: "POST" });
+        setAccount(null);
+        setRepositories([]);
+        setSelectedRepository(null);
+        setSelectedDocument(null);
+        setRootDocuments([]);
+        setFolders(initialFolders);
+        setGithubError(null);
+        setSaveStatus("saved");
+        setLastSavedContent("");
+    }
+
+    const sidebarStatus = treeLoading
+        ? "Loading repository files..."
+        : selectedRepository && folders.length === 0 && rootDocuments.length === 0
+            ? "No Markdown files found."
+            : undefined;
+
+    const workspaceLabel = selectedRepository
+        ? selectedRepository.fullName
+        : account
+            ? "GitHub"
+            : "My Workspace";
+
+    const canSave =
+        !!selectedDocument?.source &&
+        saveStatus !== "saved" &&
+        saveStatus !== "saving" &&
+        !!selectedDocument &&
+        selectedDocument.content !== lastSavedContent;
 
     return (
         <div className="flex min-h-screen bg-white text-zinc-900">
             <Sidebar
                 folders={folders}
-                onSelectDocument={setSelectedDocument}
+                documents={rootDocuments}
+                selectedDocumentId={selectedDocument?.id ?? null}
+                workspaceLabel={workspaceLabel}
+                status={sidebarStatus}
+                action={
+                    account ? (
+                        <button
+                            type="button"
+                            onClick={handleLogout}
+                            className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900"
+                        >
+                            Logout
+                        </button>
+                    ) : (
+                        <a
+                            href="/api/github/login"
+                            className="rounded-md bg-zinc-900 px-2 py-1 text-xs font-medium text-white hover:bg-zinc-700"
+                        >
+                            GitHub
+                        </a>
+                    )
+                }
+                onSelectDocument={(document) => {
+                    void handleSelectDocument(document);
+                }}
             />
 
             <main className="min-w-0 flex-1">
-                <div className="flex h-14 items-center border-b border-zinc-200 px-6">
+                <div className="flex h-14 items-center justify-between gap-4 border-b border-zinc-200 px-6">
                     {selectedDocument ? (
+                        <div className="min-w-0">
+                            <span className="block truncate text-sm font-medium">
+                                {selectedDocument.name}
+                            </span>
+                            {selectedDocument.source && (
+                                <span className="block truncate text-xs text-zinc-500">
+                                    {selectedDocument.source.owner}/{selectedDocument.source.repo}:{selectedDocument.source.path}
+                                </span>
+                            )}
+                        </div>
+                    ) : selectedRepository ? (
                         <span className="text-sm font-medium">
-                            {selectedDocument.name}
+                            {selectedRepository.fullName}
                         </span>
                     ) : (
                         <span className="text-sm text-zinc-500">
                             No document selected
                         </span>
                     )}
+
+                    {account && (
+                        <span className="shrink-0 text-sm text-zinc-500">
+                            Connected as @{account.login}
+                        </span>
+                    )}
                 </div>
 
                 <div className="flex min-h-[calc(100vh-3.5rem)] items-center justify-center">
-                    {selectedDocument ? (
-                        <Editor
-                            key={selectedDocument.id}
-                            title={selectedDocument.name}
-                            content={selectedDocument.content}
-                            onTitleChange={handleNameChange}
-                            onChange={handleContentChange}
+                    {documentLoading ? (
+                        <p className="text-sm text-zinc-500">Loading document...</p>
+                    ) : selectedDocument ? (
+                        <>
+                            <Editor
+                                key={selectedDocument.id}
+                                title={selectedDocument.name}
+                                content={selectedDocument.content}
+                                saveStatus={saveStatus}
+                                canSave={canSave}
+                                onTitleChange={handleNameChange}
+                                onChange={handleContentChange}
+                                onSave={handleSaveClick}
+                            />
+                            <CommitDialog
+                                open={commitDialogOpen}
+                                fileName={selectedDocument.name}
+                                message={commitMessage}
+                                onMessageChange={setCommitMessage}
+                                saving={saveStatus === "saving"}
+                                error={commitError}
+                                onClose={() => {
+                                    if (saveStatus !== "saving") {
+                                        setCommitDialogOpen(false);
+                                        setCommitError(null);
+                                    }
+                                }}
+                                onCommit={(msg) => void handleCommit(msg)}
+                            />
+                            {saveStatus === "error" && !commitDialogOpen && commitError && (
+                                <div className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2 rounded-md bg-red-600 px-4 py-2 text-sm text-white shadow-lg">
+                                    {commitError}
+                                </div>
+                            )}
+                        </>
+                    ) : account ? (
+                        <GitHubRepositorySelection
+                            account={account}
+                            repositories={repositories}
+                            selectedRepository={selectedRepository}
+                            installUrl={githubInstallUrl}
+                            loading={repositoriesLoading}
+                            error={githubError}
+                            onRetry={() => {
+                                window.location.reload();
+                            }}
+                            onSelectRepository={(repository) => {
+                                void handleSelectRepository(repository);
+                            }}
                         />
                     ) : (
                         <div className="text-center">
@@ -192,10 +601,413 @@ export function AppShell() {
                             <p className="mt-2 text-sm text-zinc-500">
                                 Select a document or create a new one.
                             </p>
+
+                            {githubError && (
+                                <p className="mt-4 text-sm text-red-600">{githubError}</p>
+                            )}
                         </div>
                     )}
                 </div>
             </main>
         </div>
+    );
+}
+
+function GitHubRepositorySelection({
+    account,
+    repositories,
+    selectedRepository,
+    installUrl,
+    loading,
+    error,
+    onRetry,
+    onSelectRepository,
+}: {
+    account: GitHubAccount;
+    repositories: GitHubRepository[];
+    selectedRepository: GitHubRepository | null;
+    installUrl: string | null;
+    loading: boolean;
+    error: string | null;
+    onRetry: () => void;
+    onSelectRepository: (repository: GitHubRepository) => void;
+}) {
+    const [newRepoName, setNewRepoName] = useState("gitnote-notes");
+    const [creating, setCreating] = useState(false);
+    const [createError, setCreateError] = useState<string | null>(null);
+    const [createdRepos, setCreatedRepos] = useState<GitHubRepository[]>([]);
+
+    async function handleCreateRepository() {
+        const name = newRepoName.trim();
+        if (!name) return;
+        setCreating(true);
+        setCreateError(null);
+        try {
+            const response = await fetch("/api/github/repositories", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name, private: true }),
+            });
+            const data = (await response.json()) as { repository?: GitHubRepository; error?: string; details?: string };
+            if (!response.ok || !data.repository) {
+                const detail = data.details ? ` — ${data.details.slice(0,300)}` : "";
+                throw new Error((data.error ?? "Unable to create repository.") + detail);
+            }
+            setCreatedRepos((prev) => [data.repository!, ...prev]);
+            onSelectRepository(data.repository!);
+        } catch (err) {
+            setCreateError(err instanceof Error ? err.message : "Unable to create repository.");
+        } finally {
+            setCreating(false);
+        }
+    }
+
+    const displayRepos = (() => {
+        const map = new Map<number, GitHubRepository>();
+        for (const r of [...createdRepos, ...repositories]) map.set(r.id, r);
+        return [...map.values()];
+    })();
+
+    return (
+        <div className="w-full max-w-3xl px-8 py-10">
+            <div>
+                <p className="text-sm font-medium text-zinc-500">GitHub</p>
+                <h1 className="mt-2 text-2xl font-semibold tracking-tight">
+                    Connected as @{account.login}
+                </h1>
+                <p className="mt-2 text-sm text-zinc-500">
+                    Elige un repo para usar como workspace o crea uno nuevo — como en Notion, cada repo es un workspace.
+                </p>
+            </div>
+
+            <div className="mt-8 rounded-lg border border-zinc-200 bg-zinc-50 p-4">
+                <h3 className="text-sm font-medium text-zinc-900">Crear nuevo workspace</h3>
+                <p className="mt-1 text-xs text-zinc-500">Se creará un repositorio privado con README inicial.</p>
+                <div className="mt-3 flex gap-2">
+                    <input
+                        value={newRepoName}
+                        onChange={(e) => setNewRepoName(e.target.value)}
+                        placeholder="mi-workspace"
+                        className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm outline-none focus:border-zinc-900 focus:ring-1 focus:ring-zinc-900"
+                    />
+                    <button
+                        type="button"
+                        onClick={() => void handleCreateRepository()}
+                        disabled={creating || !newRepoName.trim()}
+                        className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50"
+                    >
+                        {creating ? "Creando..." : "Crear"}
+                    </button>
+                </div>
+                {createError && <p className="mt-2 text-sm text-red-600">{createError}</p>}
+            </div>
+
+            <div className="mt-8">
+                <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
+                    Repositories
+                </h2>
+
+                {loading && (
+                    <p className="mt-4 text-sm text-zinc-500">Loading repositories...</p>
+                )}
+
+                {error && (
+                    <div className="mt-4">
+                        <p className="text-sm text-red-600">{error}</p>
+                        <button
+                            type="button"
+                            onClick={onRetry}
+                            className="mt-2 rounded-md border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-100"
+                        >
+                            Try again.
+                        </button>
+                    </div>
+                )}
+
+                {!loading && !error && displayRepos.length === 0 && (
+                    <div className="mt-4">
+                        <p className="text-sm text-zinc-500">No repositories found. Crea tu primer workspace arriba.</p>
+                        {installUrl && (
+                            <a
+                                href={installUrl}
+                                className="mt-3 inline-flex rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100"
+                            >
+                                O instalar GitHub App
+                            </a>
+                        )}
+                    </div>
+                )}
+
+                <div className="mt-4 grid gap-3">
+                    {displayRepos.map((repository) => {
+                        const selected = selectedRepository?.id === repository.id;
+
+                        return (
+                            <button
+                                key={repository.id}
+                                type="button"
+                                onClick={() => onSelectRepository(repository)}
+                                className={`rounded-lg border p-4 text-left transition hover:border-zinc-400 hover:bg-zinc-50 ${selected
+                                    ? "border-zinc-900 bg-zinc-50"
+                                    : "border-zinc-200"
+                                    }`}
+                            >
+                                <span className="block text-sm font-medium text-zinc-900">
+                                    {repository.name}
+                                </span>
+                                <span className="mt-1 block text-sm text-zinc-500">
+                                    {repository.private ? "Private" : "Public"}
+                                    {" · "}
+                                    {repository.defaultBranch}
+                                    {" · "}
+                                    {repository.fullName}
+                                </span>
+                            </button>
+                        );
+                    })}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function updateDocumentInFolders(folders: Folder[], updatedDocument: Note): Folder[] {
+    return folders.map((folder) => ({
+        ...folder,
+        documents: folder.documents.map((note) =>
+            note.id === updatedDocument.id ? updatedDocument : note,
+        ),
+        folders: folder.folders
+            ? updateDocumentInFolders(folder.folders, updatedDocument)
+            : undefined,
+    }));
+}
+
+function buildRepositoryDocuments(
+    repository: GitHubRepository,
+    tree: GitHubRepositoryTree,
+): RepositoryDocuments {
+    const folderMap = new Map<string, Folder>();
+    const rootDocuments: Note[] = [];
+
+    for (const folderPath of tree.folders) {
+        folderMap.set(folderPath, {
+            id: `github-folder:${repository.fullName}:${folderPath}`,
+            name: getBaseName(folderPath),
+            documents: [],
+            folders: [],
+        });
+    }
+
+    const topLevelFolders: Folder[] = [];
+
+    for (const [folderPath, folder] of folderMap) {
+        const parentPath = getParentPath(folderPath);
+
+        if (!parentPath) {
+            topLevelFolders.push(folder);
+            continue;
+        }
+
+        const parentFolder = folderMap.get(parentPath);
+
+        if (parentFolder) {
+            parentFolder.folders = [...(parentFolder.folders ?? []), folder];
+        }
+    }
+
+    for (const file of tree.files) {
+        const document: Note = {
+            id: `github-file:${repository.fullName}:${file.path}`,
+            name: file.name,
+            path: file.path,
+            content: "",
+            source: {
+                type: "github",
+                owner: repository.owner,
+                repo: repository.name,
+                branch: repository.defaultBranch,
+                path: file.path,
+                sha: file.sha,
+            },
+        };
+        const parentPath = getParentPath(file.path);
+
+        if (!parentPath) {
+            rootDocuments.push(document);
+            continue;
+        }
+
+        const parentFolder = folderMap.get(parentPath);
+
+        if (parentFolder) {
+            parentFolder.documents.push(document);
+        }
+    }
+
+    return {
+        folders: sortFolders(topLevelFolders),
+        documents: rootDocuments.sort(compareDocuments),
+    };
+}
+
+function sortFolders(folders: Folder[]): Folder[] {
+    return folders
+        .map((folder) => ({
+            ...folder,
+            documents: [...folder.documents].sort(compareDocuments),
+            folders: sortFolders(folder.folders ?? []),
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function compareDocuments(left: Note, right: Note): number {
+    return left.name.localeCompare(right.name);
+}
+
+function getParentPath(path: string): string | null {
+    const segments = path.split("/");
+
+    if (segments.length <= 1) {
+        return null;
+    }
+
+    return segments.slice(0, -1).join("/");
+}
+
+function getBaseName(path: string): string {
+    return path.split("/").at(-1) ?? path;
+}
+
+function getInitialFolders(): Folder[] {
+    if (typeof window === "undefined") {
+        return initialFolders;
+    }
+
+    const savedFolders = window.localStorage.getItem("gitnote-folders");
+
+    if (!savedFolders) {
+        return initialFolders;
+    }
+
+    try {
+        const parsedFolders = JSON.parse(savedFolders) as unknown;
+
+        if (Array.isArray(parsedFolders)) {
+            return parsedFolders as Folder[];
+        }
+    } catch {
+        return initialFolders;
+    }
+
+    return initialFolders;
+}
+
+function isSessionResponse(value: unknown): value is SessionResponse {
+    if (!value || typeof value !== "object" || !("connected" in value)) {
+        return false;
+    }
+
+    const response = value as {
+        connected: unknown;
+        account?: unknown;
+        installUrl?: unknown;
+    };
+
+    if (response.connected === false) {
+        return (
+            typeof response.installUrl === "string" ||
+            response.installUrl === null ||
+            typeof response.installUrl === "undefined"
+        );
+    }
+
+    return (
+        response.connected === true &&
+        isGitHubAccount(response.account) &&
+        (typeof response.installUrl === "string" || response.installUrl === null)
+    );
+}
+
+function isRepositoriesResponse(value: unknown): value is RepositoriesResponse {
+    if (!value || typeof value !== "object" || !("repositories" in value)) {
+        return false;
+    }
+
+    const response = value as { repositories: unknown };
+
+    return Array.isArray(response.repositories) && response.repositories.every(isRepository);
+}
+
+function isTreeResponse(value: unknown): value is TreeResponse {
+    if (!value || typeof value !== "object" || !("tree" in value)) {
+        return false;
+    }
+
+    const response = value as { tree: unknown };
+    const tree = response.tree as GitHubRepositoryTree | undefined;
+
+    return (
+        !!tree &&
+        Array.isArray(tree.folders) &&
+        tree.folders.every((folder) => typeof folder === "string") &&
+        Array.isArray(tree.files) &&
+        tree.files.every(isMarkdownFile)
+    );
+}
+
+function isFileResponse(value: unknown): value is FileResponse {
+    if (!value || typeof value !== "object" || !("file" in value)) {
+        return false;
+    }
+
+    const response = value as { file: unknown };
+    const file = response.file as FileResponse["file"] | undefined;
+
+    return (
+        !!file &&
+        typeof file.name === "string" &&
+        typeof file.path === "string" &&
+        typeof file.content === "string" &&
+        typeof file.sha === "string"
+    );
+}
+
+function isGitHubAccount(value: unknown): value is GitHubAccount {
+    const account = value as GitHubAccount | undefined;
+
+    return (
+        !!account &&
+        typeof account.id === "number" &&
+        typeof account.login === "string" &&
+        (typeof account.name === "string" || account.name === null) &&
+        typeof account.avatarUrl === "string"
+    );
+}
+
+function isRepository(value: unknown): value is GitHubRepository {
+    const repository = value as GitHubRepository | undefined;
+
+    return (
+        !!repository &&
+        typeof repository.id === "number" &&
+        typeof repository.name === "string" &&
+        typeof repository.fullName === "string" &&
+        typeof repository.owner === "string" &&
+        typeof repository.private === "boolean" &&
+        typeof repository.defaultBranch === "string" &&
+        (typeof repository.description === "string" || repository.description === null)
+    );
+}
+
+function isMarkdownFile(value: unknown): value is GitHubMarkdownFile {
+    const file = value as GitHubMarkdownFile | undefined;
+
+    return (
+        !!file &&
+        typeof file.name === "string" &&
+        typeof file.path === "string" &&
+        typeof file.sha === "string" &&
+        (typeof file.size === "number" || typeof file.size === "undefined")
     );
 }
