@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { Sidebar } from "./sidebar";
 import { Editor } from "./editor";
 import { CommitDialog } from "./commit-dialog";
@@ -13,6 +13,9 @@ import { RenameFolderModal } from "./rename-folder-modal";
 import { MoveDocumentModal } from "./move-document-modal";
 import { ConfirmDialog } from "./confirm-dialog";
 import { RightPanel } from "./right-panel";
+import { DiffViewer } from "./diff-viewer";
+import { GitHistory } from "./git-history";
+import { CommitDetails } from "./commit-details";
 import { Toaster, toast } from "sonner";
 import { cn } from "@/app/lib/utils";
 import type { Folder, Note, SaveStatus } from "./types";
@@ -26,6 +29,7 @@ import {
   flattenNotes,
   getFolderPathById,
 } from "@/app/lib/workspace";
+import { getWorkspaceChanges, type OriginalSnapshot, type WorkspaceChange } from "@/app/lib/workspace-changes";
 
 const initialFolders: Folder[] = [
     {
@@ -192,7 +196,38 @@ export function AppShell() {
     const [commitError, setCommitError] = useState<string | null>(null);
     const [commitMessage, setCommitMessage] = useState("");
     const [headings, setHeadings] = useState<{ id: string; text: string; level: number }[]>([]);
-    const [hasWorkspaceChanges, setHasWorkspaceChanges] = useState(false);
+
+    // Workspace changes snapshot + diff selection
+    const [originalSnapshot, setOriginalSnapshot] = useState<OriginalSnapshot>([]);
+    const [selectedChange, setSelectedChange] = useState<WorkspaceChange | null>(null);
+    const [viewMode, setViewMode] = useState<"editor" | "diff" | "history" | "commit" | "historyDiff">("editor");
+    const [changesCollapsed, setChangesCollapsed] = useState(false);
+    const [historyCollapsed, setHistoryCollapsed] = useState(false);
+    const [originalLoadingIds, setOriginalLoadingIds] = useState<Set<string>>(new Set());
+    const [originalErrors, setOriginalErrors] = useState<Map<string, string>>(new Map());
+    const originalFetchingRef = useRef<Set<string>>(new Set());
+
+    // History
+    type HistoryCommit = { sha: string; message: string; authorName: string; authorEmail?: string; authorAvatarUrl?: string; date: string; parentSha?: string };
+    type CommitFile = { path: string; previousPath?: string; status: "added" | "modified" | "removed" | "renamed"; additions: number; deletions: number; sha?: string };
+    type CommitDetails = { sha: string; message: string; authorName: string; authorEmail?: string; authorAvatarUrl?: string; date: string; parentSha?: string; files: CommitFile[]; stats: { additions: number; deletions: number; total: number } };
+    const [historyCommits, setHistoryCommits] = useState<HistoryCommit[]>([]);
+    const [historyLoading, setHistoryLoading] = useState(false);
+    const [historyError, setHistoryError] = useState<string | null>(null);
+    const [historyFilterPath, setHistoryFilterPath] = useState<string | null>(null);
+    const [fileHistoryCommits, setFileHistoryCommits] = useState<HistoryCommit[]>([]);
+    const [fileHistoryLoading, setFileHistoryLoading] = useState(false);
+    const [fileHistoryError, setFileHistoryError] = useState<string | null>(null);
+    const [selectedHistorySha, setSelectedHistorySha] = useState<string | null>(null);
+    const [commitDetails, setCommitDetails] = useState<CommitDetails | null>(null);
+    const [commitDetailsLoading, setCommitDetailsLoading] = useState(false);
+    const [commitDetailsError, setCommitDetailsError] = useState<string | null>(null);
+    const commitDetailsCache = useRef<Map<string, CommitDetails>>(new Map());
+    const [selectedHistoryFile, setSelectedHistoryFile] = useState<CommitFile | null>(null);
+    const [historicalDiff, setHistoricalDiff] = useState<{ path: string; oldPath?: string; status: CommitFile["status"]; oldContent: string; newContent: string; loading: boolean; error: string | null } | null>(null);
+    const historyCache = useRef<Map<string, { commits: HistoryCommit[]; time: number }>>(new Map());
+    const fileContentCache = useRef<Map<string, string>>(new Map()); // key `${sha}:${path}` -> content
+    const [restoreConfirm, setRestoreConfirm] = useState<{ type: "commit" | "file"; file?: CommitFile } | null>(null);
 
     // CRUD modals
     const [renameDoc, setRenameDoc] = useState<Note | null>(null);
@@ -200,6 +235,12 @@ export function AppShell() {
     const [deleteDoc, setDeleteDoc] = useState<Note | null>(null);
     const [renameFolderTarget, setRenameFolderTarget] = useState<Folder | null>(null);
     const [deleteFolderTarget, setDeleteFolderTarget] = useState<Folder | null>(null);
+
+    const changes = useMemo<WorkspaceChange[]>(() => {
+        // Only track changes when a GitHub repo is connected (snapshot non-empty or repo selected)
+        if (!selectedRepository && originalSnapshot.length === 0) return [];
+        return getWorkspaceChanges(originalSnapshot, folders, rootDocuments);
+    }, [originalSnapshot, folders, rootDocuments, selectedRepository]);
 
     // Keep ref in sync for stable comparison in callbacks without re-renders
     useEffect(() => {
@@ -355,11 +396,11 @@ export function AppShell() {
         // We intentionally don't flip saveStatus for name alone (commit is for markdown content).
     }
 
-    async function handleCreateDocument(note: Note) {
+    function handleCreateDocument(note: Note) {
         const path = note.path;
         const folderPath = path.includes("/") ? path.split("/").slice(0, -1).join("/") : null;
 
-        // Optimistic local update
+        // Local-only creation — produces WorkspaceChange (Added). Commit happens via Changes panel.
         if (!folderPath) {
             setRootDocuments((prev) => [...prev, note].sort((a, b) => a.name.localeCompare(b.name)));
         } else {
@@ -373,59 +414,11 @@ export function AppShell() {
         setSelectedDocument(note);
         setLastSavedContent(note.content);
         setSaveStatus("saved");
-
-        if (selectedRepository) {
-            // Commit de inmediato a GitHub
-            try {
-                const res = await fetch("/api/github/file", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        owner: selectedRepository.owner,
-                        repo: selectedRepository.name,
-                        path: note.path,
-                        branch: selectedRepository.defaultBranch,
-                        content: note.content,
-                        message: `Create ${note.path}`,
-                    }),
-                });
-                const data = (await res.json().catch(() => ({}))) as { file?: { sha: string; path: string }; error?: string };
-                if (!res.ok || !data.file) throw new Error(data.error ?? "Unable to create file on GitHub");
-                const sha = data.file.sha;
-                const source = {
-                    type: "github" as const,
-                    owner: selectedRepository.owner,
-                    repo: selectedRepository.name,
-                    branch: selectedRepository.defaultBranch,
-                    path: note.path,
-                    sha,
-                };
-                const withSource: Note = { ...note, source, id: `github-file:${selectedRepository.fullName}:${note.path}` };
-                // Replace local note with github-sourced one (preserve tree, just attach source/sha)
-                setFolders((prev) =>
-                    prev.map((fld) => ({
-                        ...fld,
-                        documents: fld.documents.map((d) => (d.id === note.id ? withSource : d)),
-                        folders: fld.folders ? replaceInTree(fld.folders, note.id, withSource) : undefined,
-                    })),
-                );
-                setRootDocuments((prev) => prev.map((d) => (d.id === note.id ? withSource : d)));
-                setSelectedDocument(withSource);
-                toast.success("Document created on GitHub", { description: note.path });
-                setHasWorkspaceChanges(false);
-                return;
-            } catch (e) {
-                const msg = e instanceof Error ? e.message : "Unable to create file on GitHub";
-                toast.error(msg);
-                setHasWorkspaceChanges(true);
-                return;
-            }
-        }
-
-        setHasWorkspaceChanges(true);
+        setViewMode("editor");
         toast.success("Document created", { description: note.path });
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     function replaceInTree(folders: Folder[], oldId: string, newNote: Note): Folder[] {
         return folders.map((f) => ({
             ...f,
@@ -434,7 +427,7 @@ export function AppShell() {
         }));
     }
 
-    async function handleCreateFolder(name: string, parentPath: string | null) {
+    function handleCreateFolder(name: string, parentPath: string | null) {
         const result = createFolder(folders, parentPath, name);
         if (result.error) {
             toast.error(result.error);
@@ -442,37 +435,6 @@ export function AppShell() {
         }
         setFolders(result.folders);
         setNewFolderOpen(false);
-
-        if (selectedRepository) {
-            const folderPath = parentPath ? `${parentPath}/${name}` : name;
-            const gitkeepPath = `${folderPath}/.gitkeep`;
-            try {
-                const res = await fetch("/api/github/file", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        owner: selectedRepository.owner,
-                        repo: selectedRepository.name,
-                        path: gitkeepPath,
-                        branch: selectedRepository.defaultBranch,
-                        content: "",
-                        message: `Create folder ${folderPath}`,
-                    }),
-                });
-                const data = (await res.json().catch(() => ({}))) as { file?: { sha: string }; error?: string };
-                if (!res.ok || !data.file) throw new Error(data.error ?? "Unable to create folder on GitHub");
-                toast.success("Folder created on GitHub", { description: folderPath });
-                setHasWorkspaceChanges(false);
-                return;
-            } catch (e) {
-                const msg = e instanceof Error ? e.message : "Unable to create folder on GitHub";
-                toast.error(msg);
-                setHasWorkspaceChanges(true);
-                return;
-            }
-        }
-
-        setHasWorkspaceChanges(true);
         toast.success("Folder created", { description: parentPath ? `${parentPath}/${name}` : name });
     }
 
@@ -488,7 +450,6 @@ export function AppShell() {
         if (selectedDocument?.id === result.renamed.id) {
             setSelectedDocument(result.renamed);
         }
-        setHasWorkspaceChanges(true);
         setRenameDoc(null);
         toast.success("Document renamed", { description: result.renamed.path });
     }
@@ -523,7 +484,6 @@ export function AppShell() {
                 setSaveStatus("saved");
             }
         }
-        setHasWorkspaceChanges(true);
         setDeleteDoc(null);
         toast.success("Document deleted");
     }
@@ -540,8 +500,6 @@ export function AppShell() {
         if (selectedDocument?.id === result.moved.id) {
             setSelectedDocument(result.moved);
         }
-        // also update moveDoc reference
-        setHasWorkspaceChanges(true);
         setMoveDoc(null);
         toast.success("Document moved", { description: result.moved.path });
     }
@@ -557,17 +515,11 @@ export function AppShell() {
         // Update selectedDocument if it was inside renamed folder
         if (selectedDocument && result.oldPath && result.newPath) {
             if (selectedDocument.path === result.oldPath || selectedDocument.path.startsWith(result.oldPath + "/")) {
-                const newDocPath = selectedDocument.path.replace(result.oldPath, result.newPath);
-                const updated = { ...selectedDocument, path: newDocPath, name: selectedDocument.name, source: selectedDocument.source ? { ...selectedDocument.source, path: newDocPath } : undefined };
-                // Need to find actual updated doc from tree to keep correct id; easiest re-find
                 const all = flattenNotes(result.folders, rootDocuments);
                 const found = all.find((d) => d.id === selectedDocument.id);
                 if (found) setSelectedDocument(found);
-                else setSelectedDocument(updated);
             }
         }
-        // Also need to update rootDocuments paths if they were inside? root docs never inside folder, so no.
-        setHasWorkspaceChanges(true);
         setRenameFolderTarget(null);
         toast.success("Folder renamed", { description: newName });
     }
@@ -601,7 +553,6 @@ export function AppShell() {
                 setSaveStatus("saved");
             }
         }
-        setHasWorkspaceChanges(true);
         setDeleteFolderTarget(null);
         toast.success("Folder deleted");
     }
@@ -621,70 +572,152 @@ export function AppShell() {
     }
 
     async function handleCommit(commitMessageParam: string) {
-        if (!selectedDocument?.source) return;
         const trimmed = commitMessageParam.trim();
         if (!trimmed) {
             setCommitError("Commit message is required.");
             return;
         }
         if (saveStatus === "saving") return;
-        // Avoid commit if no changes
-        if (selectedDocument.content === lastSavedContent) {
-            setCommitDialogOpen(false);
-            setSaveStatus("saved");
+        if (!selectedRepository) {
+            setCommitError("Select a repository to commit.");
             return;
+        }
+        if (changes.length === 0) {
+            // Nothing to commit — maybe single file unsaved not yet in changes due to lazy snapshot?
+            // Fall back to previous single-file check
+            if (selectedDocument && selectedDocument.content !== lastSavedContent && selectedDocument.source) {
+                // single file commit via PUT as before (will be covered by changes normally)
+            } else {
+                setCommitDialogOpen(false);
+                setSaveStatus("saved");
+                return;
+            }
         }
 
         setSaveStatus("saving");
         setCommitError(null);
 
         try {
-            const response = await fetch("/api/github/file", {
-                method: "PUT",
+            // Build payload for atomic multi-file commit
+            const allCurrentDocs = flattenNotes(folders, rootDocuments);
+            const payloadChanges: Array<{ type: "added" | "modified" | "deleted" | "renamed"; path: string; oldPath?: string; content?: string; sha?: string }> = [];
+            for (const c of changes) {
+                if (c.type === "added") {
+                    const doc = allCurrentDocs.find((d) => d.id === c.id);
+                    payloadChanges.push({ type: "added", path: c.path, content: doc?.content ?? c.content ?? "" });
+                } else if (c.type === "modified") {
+                    payloadChanges.push({ type: "modified", path: c.path, content: c.content ?? "", sha: c.source?.sha });
+                } else if (c.type === "deleted") {
+                    if (!c.source?.sha) throw new Error(`Missing SHA for deleted file ${c.path}. Reload repository.`);
+                    payloadChanges.push({ type: "deleted", path: c.path, sha: c.source.sha });
+                } else if (c.type === "renamed") {
+                    const doc = allCurrentDocs.find((d) => d.id === c.id);
+                    const content = doc?.content ?? c.content ?? c.oldContent ?? "";
+                    payloadChanges.push({ type: "renamed", path: c.path, oldPath: c.oldPath!, content, sha: c.source?.sha });
+                }
+            }
+
+            // If changes empty but single file modified (edge), add it
+            if (payloadChanges.length === 0 && selectedDocument?.source && selectedDocument.content !== lastSavedContent) {
+                payloadChanges.push({ type: "modified", path: selectedDocument.path, content: selectedDocument.content, sha: selectedDocument.source.sha });
+            }
+
+            if (payloadChanges.length === 0) throw new Error("No changes to commit.");
+
+            const res = await fetch("/api/github/commit", {
+                method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    owner: selectedDocument.source.owner,
-                    repo: selectedDocument.source.repo,
-                    path: selectedDocument.source.path,
-                    branch: selectedDocument.source.branch,
-                    sha: selectedDocument.source.sha,
-                    content: selectedDocument.content,
+                    owner: selectedRepository.owner,
+                    repo: selectedRepository.name,
+                    branch: selectedRepository.defaultBranch,
                     message: trimmed,
+                    changes: payloadChanges,
                 }),
             });
-
-            const data = (await response.json().catch(() => ({}))) as { error?: string; file?: { sha: string; path: string } };
-
-            if (!response.ok || !data.file) {
+            const data = (await res.json().catch(() => ({}))) as { error?: string; commitSha?: string };
+            if (!res.ok || !data.commitSha) {
                 const friendly =
                     data.error ??
-                    (response.status === 409
-                        ? "This file changed on GitHub. Reload the file before saving again."
-                        : response.status === 401 || response.status === 403
-                            ? "You don't have permission to modify this file."
-                            : response.status >= 500
-                                ? "Unable to connect to GitHub."
-                                : "Unable to save changes. Please try again.");
+                    (res.status === 409
+                        ? "Some files changed on GitHub. Reload the repository before committing again."
+                        : res.status === 401 || res.status === 403
+                            ? "You don't have permission to commit to this repository."
+                            : "Unable to commit changes.");
                 throw new Error(friendly);
             }
 
-            // Success: update sha and mark saved
-            const newSha = data.file.sha;
-            setLastSavedContent(selectedDocument.content);
-            setSelectedDocument((prev) =>
-                prev && prev.source
-                    ? { ...prev, source: { ...prev.source, sha: newSha } }
-                    : prev,
+            // Success: sync snapshot and workspace SHA/paths
+            const commitSha = data.commitSha;
+            // Update workspace source.path to current path and set sha placeholder (commitSha) for future operations
+            // For added files, assign source
+            const syncSourceInFolders = (fs: Folder[]): Folder[] =>
+                fs.map((f) => ({
+                    ...f,
+                    documents: f.documents.map((d) => {
+                        const isChanged = changes.some((c) => c.id === d.id);
+                        if (isChanged && !d.source && selectedRepository) {
+                            return { ...d, source: { type: "github" as const, owner: selectedRepository.owner, repo: selectedRepository.name, branch: selectedRepository.defaultBranch, path: d.path, sha: commitSha } };
+                        }
+                        if (d.source) return { ...d, source: { ...d.source, path: d.path, sha: commitSha } };
+                        return d;
+                    }),
+                    folders: f.folders ? syncSourceInFolders(f.folders) : undefined,
+                }));
+            setFolders((prev) => syncSourceInFolders(prev));
+            setRootDocuments((prev) =>
+                prev.map((d) => {
+                    const isChanged = changes.some((c) => c.id === d.id);
+                    if (isChanged && !d.source && selectedRepository) {
+                        return { ...d, source: { type: "github" as const, owner: selectedRepository.owner, repo: selectedRepository.name, branch: selectedRepository.defaultBranch, path: d.path, sha: commitSha } };
+                    }
+                    if (d.source) return { ...d, source: { ...d.source, path: d.path, sha: commitSha } };
+                    return d;
+                })
             );
+            if (selectedDocument?.source) {
+                setSelectedDocument((prev) => (prev && prev.source ? { ...prev, source: { ...prev.source, path: prev.path, sha: commitSha } } : prev));
+                setLastSavedContent(selectedDocument.content);
+            } else if (selectedDocument) {
+                // added doc now has source
+                const isAdded = changes.some((c) => c.id === selectedDocument.id && c.type === "added");
+                if (isAdded) {
+                    setSelectedDocument((prev) =>
+                        prev
+                            ? {
+                                  ...prev,
+                                  source: { type: "github", owner: selectedRepository.owner, repo: selectedRepository.name, branch: selectedRepository.defaultBranch, path: prev.path, sha: commitSha },
+                              }
+                            : prev
+                    );
+                    if (selectedDocument) setLastSavedContent(selectedDocument.content);
+                }
+            }
+
+            setOriginalSnapshot(() => {
+                // Build from current docs (including added) — deleted already not in allCurrentDocs
+                const snap: OriginalSnapshot = allCurrentDocs.map((d) => {
+                    const isAdded = changes.some((c) => c.id === d.id && c.type === "added");
+                    const source = d.source
+                        ? { ...d.source, path: d.path, sha: commitSha }
+                        : isAdded && selectedRepository
+                            ? { type: "github" as const, owner: selectedRepository.owner, repo: selectedRepository.name, branch: selectedRepository.defaultBranch, path: d.path, sha: commitSha }
+                            : undefined;
+                    return { id: d.id, path: d.path, name: d.name, content: d.content, source };
+                });
+                // Note: deleted files not in snap (correct). Renamed files have new path already.
+                return snap;
+            });
+
             setSaveStatus("saved");
             setCommitDialogOpen(false);
             setGithubError(null);
-            // Tree remains consistent — file path unchanged
+            setSelectedChange(null);
+            setViewMode("editor");
+            toast.success("Changes committed", { description: `${payloadChanges.length} file(s) — ${trimmed}` });
         } catch (err) {
-            console.error("Save failed:", err);
-            const message =
-                err instanceof Error ? err.message : "Unable to save changes. Please try again.";
-            // Map network errors
+            console.error("Commit failed:", err);
+            const message = err instanceof Error ? err.message : "Unable to commit changes.";
             if (message.includes("Failed to fetch") || message.includes("NetworkError")) {
                 setCommitError("Unable to connect to GitHub.");
             } else {
@@ -694,16 +727,43 @@ export function AppShell() {
         }
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    function updateShaInFolders(folders: Folder[], docId: string, newSha: string, newPath: string): Folder[] {
+        return folders.map((f) => ({
+            ...f,
+            documents: f.documents.map((d) => (d.id === docId && d.source ? { ...d, source: { ...d.source, sha: newSha, path: newPath } } : d)),
+            folders: f.folders ? updateShaInFolders(f.folders, docId, newSha, newPath) : undefined,
+        }));
+    }
+
     async function handleSelectRepository(repository: GitHubRepository) {
         setSelectedRepository(repository);
         setSelectedDocument(null);
         setFolders([]);
         setRootDocuments([]);
+        setOriginalSnapshot([]);
+        setSelectedChange(null);
+        setViewMode("editor");
+        setOriginalLoadingIds(new Set());
+        setOriginalErrors(new Map());
+        originalFetchingRef.current.clear();
+        setHistoryCommits([]);
+        setFileHistoryCommits([]);
+        setFileHistoryLoading(false);
+        setFileHistoryError(null);
+        setHistoryLoading(false);
+        setHistoryFilterPath(null);
+        setSelectedHistorySha(null);
+        setCommitDetails(null);
+        setSelectedHistoryFile(null);
+        setHistoricalDiff(null);
+        historyCache.current.clear();
+        commitDetailsCache.current.clear();
+        fileContentCache.current.clear();
         setTreeLoading(true);
         setGithubError(null);
         setSaveStatus("saved");
         setLastSavedContent("");
-        setHasWorkspaceChanges(false);
         // Persist selection cross-device (Supabase) + fallback localStorage
         try { localStorage.setItem("gitnote:selectedRepo", JSON.stringify({ owner: repository.owner, repo: repository.name, branch: repository.defaultBranch })); } catch {}
         void fetch("/api/github/selected-repo", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ owner: repository.owner, repo: repository.name, branch: repository.defaultBranch }) }).catch(() => {});
@@ -726,6 +786,16 @@ export function AppShell() {
 
             setFolders(documents.folders);
             setRootDocuments(documents.documents);
+            // Create original snapshot — preserve empty content for lazy-loaded files; fill on file load
+            const snapshot: OriginalSnapshot = [];
+            const collect = (folders: Folder[], roots: Note[]) => {
+                const all = flattenNotes(folders, roots);
+                for (const doc of all) {
+                    snapshot.push({ id: doc.id, path: doc.path, name: doc.name, content: doc.content, source: doc.source ? { ...doc.source } : undefined });
+                }
+            };
+            collect(documents.folders, documents.documents);
+            setOriginalSnapshot(snapshot);
         } catch {
             setGithubError("Unable to load repository files.");
         } finally {
@@ -734,6 +804,7 @@ export function AppShell() {
     }
 
     async function handleSelectDocument(document: Note) {
+        setViewMode("editor");
         if (!document.source) {
             setSelectedDocument(document);
             setLastSavedContent(document.content);
@@ -767,7 +838,7 @@ export function AppShell() {
             setSaveStatus("saved");
             setCommitDialogOpen(false);
             setCommitError(null);
-            setSelectedDocument({
+            const updatedDoc: Note = {
                 ...document,
                 name: file.name,
                 content: file.content,
@@ -775,6 +846,19 @@ export function AppShell() {
                     ...document.source,
                     sha: file.sha,
                 },
+            };
+            setSelectedDocument(updatedDoc);
+            // Update tree with loaded content
+            setFolders((prev) => updateDocumentInFolders(prev, updatedDoc));
+            setRootDocuments((prev) => prev.map((d) => (d.id === updatedDoc.id ? updatedDoc : d)));
+            // Populate original snapshot if empty (lazy load). Preserve snapshot for diff comparison.
+            setOriginalSnapshot((prev) => {
+                const idx = prev.findIndex((d) => d.id === document.id);
+                if (idx === -1) return prev;
+                if (prev[idx].content !== "" && prev[idx].content !== undefined) return prev;
+                const next = [...prev];
+                next[idx] = { ...next[idx], content: file.content, source: { ...next[idx].source!, sha: file.sha } as Note["source"] };
+                return next;
             });
         } catch {
             setGithubError("Unable to load document.");
@@ -783,10 +867,385 @@ export function AppShell() {
         }
     }
 
+    async function ensureOriginalContent(change: WorkspaceChange) {
+        if (change.type === "added") return;
+        const snapshotDoc = originalSnapshot.find((d) => d.id === change.id);
+        // If snapshot already has content, nothing to do (oldContent will be populated via changes)
+        // Need to fetch only if snapshot content is empty string (lazy not loaded) and no error
+        // We treat empty string as "not yet loaded" for lazy; for truly empty files this will fetch once and cache "" again which is fine.
+        const alreadyLoaded = snapshotDoc && snapshotDoc.content !== "" && (change.oldContent !== undefined && change.oldContent !== "");
+        if (alreadyLoaded) return;
+        // Avoid duplicate fetches
+        if (originalFetchingRef.current.has(change.id)) return;
+        // Need snapshot metadata to fetch
+        const source = snapshotDoc?.source ?? change.source;
+        if (!source) return;
+        // If change.oldContent is already non-empty, snapshot already has it; skip
+        if (change.oldContent && change.oldContent !== "") return;
+        // If snapshotDoc content is non-empty but change.oldContent empty? shouldn't happen
+        if (snapshotDoc && snapshotDoc.content !== "" && snapshotDoc.content !== undefined) return;
+
+        originalFetchingRef.current.add(change.id);
+        setOriginalLoadingIds((prev) => new Set(prev).add(change.id));
+        setOriginalErrors((prev) => {
+            const m = new Map(prev);
+            m.delete(change.id);
+            return m;
+        });
+        try {
+            const githubPath = source.path;
+            const params = new URLSearchParams({ owner: source.owner, repo: source.repo, path: githubPath, ref: source.branch });
+            const res = await fetch(`/api/github/file?${params.toString()}`);
+            const data = (await res.json()) as unknown as { file?: { content: string; sha: string }; error?: string };
+            if (!res.ok || !data.file) throw new Error(data.error ?? "Unable to load original version.");
+            const fileContent = data.file.content;
+            const fileSha = data.file.sha;
+            setOriginalSnapshot((prev) =>
+                prev.map((d) => (d.id === change.id ? { ...d, content: fileContent, source: d.source ? { ...d.source, sha: fileSha } : d.source } : d))
+            );
+            setSelectedChange((prev) => (prev && prev.id === change.id ? { ...prev, oldContent: fileContent } : prev));
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : "Unable to load original version.";
+            setOriginalErrors((prev) => {
+                const m = new Map(prev);
+                m.set(change.id, msg);
+                return m;
+            });
+        } finally {
+            originalFetchingRef.current.delete(change.id);
+            setOriginalLoadingIds((prev) => {
+                const s = new Set(prev);
+                s.delete(change.id);
+                return s;
+            });
+        }
+    }
+
+    function handleSelectChange(change: WorkspaceChange) {
+        setSelectedChange(change);
+        setViewMode("diff");
+        void ensureOriginalContent(change);
+    }
+
+    function handleRetryOriginal(change: WorkspaceChange) {
+        void ensureOriginalContent(change);
+    }
+
+    // History — supports repo history (path=null) and file history (path="docs/API.md")
+    async function fetchHistory(pathOverride?: string | null | boolean, force = false) {
+        if (!selectedRepository) return;
+        // handle legacy call fetchHistory(true) where first arg is boolean force
+        let effectivePath: string | null;
+        let effectiveForce = force;
+        if (typeof pathOverride === "boolean") {
+            effectiveForce = pathOverride;
+            effectivePath = historyFilterPath;
+        } else {
+            effectivePath = pathOverride !== undefined ? pathOverride : historyFilterPath;
+        }
+        const key = `${selectedRepository.owner}/${selectedRepository.name}/${selectedRepository.defaultBranch}:${effectivePath ?? ""}`;
+        const isFileHistory = !!effectivePath;
+        if (!effectiveForce && historyCache.current.has(key)) {
+            const cached = historyCache.current.get(key)!;
+            if (Date.now() - cached.time < 60000) {
+                if (isFileHistory) setFileHistoryCommits(cached.commits);
+                else setHistoryCommits(cached.commits);
+                return;
+            }
+        }
+        if (isFileHistory) {
+            setFileHistoryLoading(true);
+            setFileHistoryError(null);
+        } else {
+            setHistoryLoading(true);
+            setHistoryError(null);
+        }
+        try {
+            const params = new URLSearchParams({ owner: selectedRepository.owner, repo: selectedRepository.name, branch: selectedRepository.defaultBranch, perPage: "30" });
+            if (effectivePath) params.set("path", effectivePath);
+            const res = await fetch(`/api/github/history?${params.toString()}`);
+            const data = (await res.json()) as { commits?: HistoryCommit[]; error?: string };
+            if (!res.ok || !data.commits) throw new Error(data.error ?? "Unable to load commit history.");
+            if (isFileHistory) setFileHistoryCommits(data.commits);
+            else setHistoryCommits(data.commits);
+            historyCache.current.set(key, { commits: data.commits, time: Date.now() });
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : "Unable to load commit history.";
+            if (isFileHistory) setFileHistoryError(msg);
+            else setHistoryError(msg);
+        } finally {
+            if (isFileHistory) setFileHistoryLoading(false);
+            else setHistoryLoading(false);
+        }
+    }
+
+    async function handleSelectHistoryCommit(sha: string) {
+        setSelectedHistorySha(sha);
+        setSelectedHistoryFile(null);
+        setHistoricalDiff(null);
+        setViewMode("commit");
+        // check cache
+        if (commitDetailsCache.current.has(sha)) {
+            setCommitDetails(commitDetailsCache.current.get(sha)!);
+            return;
+        }
+        if (!selectedRepository) return;
+        setCommitDetailsLoading(true);
+        setCommitDetailsError(null);
+        setCommitDetails(null);
+        try {
+            const params = new URLSearchParams({ owner: selectedRepository.owner, repo: selectedRepository.name, sha });
+            const res = await fetch(`/api/github/commit?${params.toString()}`);
+            const data = (await res.json()) as { commit?: CommitDetails; error?: string };
+            if (!res.ok || !data.commit) throw new Error(data.error ?? "Unable to load commit details.");
+            commitDetailsCache.current.set(sha, data.commit);
+            setCommitDetails(data.commit);
+        } catch (e) {
+            setCommitDetailsError(e instanceof Error ? e.message : "Unable to load commit details.");
+        } finally {
+            setCommitDetailsLoading(false);
+        }
+    }
+
+    async function fetchFileAtRef(path: string, ref: string): Promise<string> {
+        const cacheKey = `${ref}:${path}`;
+        if (fileContentCache.current.has(cacheKey)) return fileContentCache.current.get(cacheKey)!;
+        if (!selectedRepository) throw new Error("No repository");
+        const params = new URLSearchParams({ owner: selectedRepository.owner, repo: selectedRepository.name, path, ref });
+        const res = await fetch(`/api/github/file?${params.toString()}`);
+        const data = (await res.json()) as { file?: { content: string }; error?: string };
+        if (!res.ok || !data.file) throw new Error(data.error ?? "Unable to load file.");
+        fileContentCache.current.set(cacheKey, data.file.content);
+        return data.file.content;
+    }
+
+    async function handleSelectHistoryFile(file: CommitFile) {
+        if (!commitDetails || !selectedRepository) return;
+        setSelectedHistoryFile(file);
+        setViewMode("historyDiff");
+        const parentSha = commitDetails.parentSha;
+        const commitSha = commitDetails.sha;
+        setHistoricalDiff({ path: file.path, oldPath: file.previousPath, status: file.status, oldContent: "", newContent: "", loading: true, error: null });
+        try {
+            let oldContent = "";
+            let newContent = "";
+            if (file.status === "added") {
+                newContent = await fetchFileAtRef(file.path, commitSha);
+                oldContent = "";
+            } else if (file.status === "removed") {
+                if (parentSha) oldContent = await fetchFileAtRef(file.path, parentSha);
+                newContent = "";
+            } else if (file.status === "renamed" && file.previousPath) {
+                if (parentSha) oldContent = await fetchFileAtRef(file.previousPath, parentSha).catch(() => "");
+                newContent = await fetchFileAtRef(file.path, commitSha);
+            } else {
+                // modified
+                if (parentSha) oldContent = await fetchFileAtRef(file.path, parentSha).catch(() => "");
+                newContent = await fetchFileAtRef(file.path, commitSha);
+            }
+            setHistoricalDiff({ path: file.path, oldPath: file.previousPath, status: file.status, oldContent, newContent, loading: false, error: null });
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : "Unable to load file contents.";
+            setHistoricalDiff((prev) => (prev ? { ...prev, loading: false, error: msg } : null));
+        }
+    }
+
+    function handleOpenHistory() {
+        if (!selectedRepository) {
+            toast.error("Select a repository to view history");
+            return;
+        }
+        setViewMode("history");
+        // default to repository history; preserve file filter if already set? reset to repo for consistency
+        // keep current filter but ensure history fetched for that filter
+        void fetchHistory();
+    }
+
+    function handleToggleHistory() {
+        if (viewMode === "history" || viewMode === "commit" || viewMode === "historyDiff") {
+            setViewMode("editor");
+        } else {
+            handleOpenHistory();
+        }
+    }
+
+    // Auto-fetch repo history for sidebar when repo is selected
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useEffect(() => {
+        if (selectedRepository) {
+            void fetchHistory(null);
+        }
+    }, [selectedRepository?.fullName]);
+
+    async function handleRestoreCommit() {
+        if (!commitDetails || !selectedRepository) return;
+        // confirm already done via restoreConfirm
+        setRestoreConfirm(null);
+        try {
+            // Fetch full tree at commit
+            const params = new URLSearchParams({ owner: selectedRepository.owner, repo: selectedRepository.name, branch: commitDetails.sha });
+            const res = await fetch(`/api/github/tree?${params.toString()}`);
+            const data = (await res.json()) as { tree?: { files: Array<{ path: string; sha: string }>; folders: string[] }; error?: string };
+            if (!res.ok || !data.tree) throw new Error(data.error ?? "Unable to load commit tree.");
+            const files = data.tree.files;
+            // Fetch contents for each markdown file (limit parallel)
+            const contents: Array<{ path: string; content: string }> = [];
+            // fetch in batches of 5 to avoid rate limit
+            for (let i = 0; i < files.length; i += 5) {
+                const batch = files.slice(i, i + 5);
+                const batchContents = await Promise.all(
+                    batch.map(async (f) => {
+                        try {
+                            const c = await fetchFileAtRef(f.path, commitDetails.sha);
+                            return { path: f.path, content: c };
+                        } catch {
+                            return { path: f.path, content: "" };
+                        }
+                    })
+                );
+                contents.push(...batchContents);
+            }
+            // Build new workspace from commit contents
+            const docs: Note[] = contents.map((c) => ({
+                id: `github-file:${selectedRepository.fullName}:${c.path}`,
+                name: c.path.split("/").pop() ?? c.path,
+                path: c.path,
+                content: c.content,
+            }));
+            const folderMap = new Map<string, Folder>();
+            for (const folderPath of data.tree.folders) {
+                folderMap.set(folderPath, { id: `github-folder:${selectedRepository.fullName}:${folderPath}`, name: folderPath.split("/").pop() ?? folderPath, documents: [], folders: [] });
+            }
+            const topLevel: Folder[] = [];
+            for (const [fp, folder] of folderMap) {
+                const parentPath = fp.includes("/") ? fp.split("/").slice(0, -1).join("/") : null;
+                if (!parentPath) topLevel.push(folder);
+                else {
+                    const parent = folderMap.get(parentPath);
+                    if (parent) parent.folders = [...(parent.folders ?? []), folder];
+                }
+            }
+            // Distribute docs
+            const rootDocs: Note[] = [];
+            for (const doc of docs) {
+                const parentPath = doc.path.includes("/") ? doc.path.split("/").slice(0, -1).join("/") : null;
+                if (!parentPath) rootDocs.push(doc);
+                else {
+                    const parent = folderMap.get(parentPath);
+                    if (parent) parent.documents.push(doc);
+                    else rootDocs.push(doc); // fallback
+                }
+            }
+            // Sort
+            const sortFolders = (fs: Folder[]): Folder[] =>
+                fs
+                    .map((f) => ({ ...f, documents: [...f.documents].sort((a, b) => a.name.localeCompare(b.name)), folders: f.folders ? sortFolders(f.folders) : [] }))
+                    .sort((a, b) => a.name.localeCompare(b.name));
+            const newFolders = sortFolders(topLevel);
+            const newRoot = rootDocs.sort((a, b) => a.name.localeCompare(b.name));
+            setFolders(newFolders);
+            setRootDocuments(newRoot);
+            // Keep snapshot unchanged (represents HEAD) -> changes will now reflect diff to restored state
+            // Update selectedDocument if it was deleted -> pick first doc
+            if (selectedDocument) {
+                const all = [...newRoot, ...flattenNotes(newFolders, [])];
+                const stillExists = all.find((d) => d.id === selectedDocument.id);
+                if (!stillExists) {
+                    if (all.length > 0) setSelectedDocument(all[0]);
+                    else setSelectedDocument(null);
+                } else {
+                    const updated = all.find((d) => d.id === selectedDocument.id);
+                    if (updated) setSelectedDocument(updated);
+                }
+            }
+            setViewMode("editor");
+            setSelectedHistoryFile(null);
+            setHistoricalDiff(null);
+            toast.success("Workspace restored from commit", { description: commitDetails.sha.slice(0, 7) });
+        } catch (e) {
+            toast.error(e instanceof Error ? e.message : "Unable to restore commit");
+        }
+    }
+
+    async function handleRestoreFile(file: CommitFile) {
+        if (!selectedRepository || !commitDetails) return;
+        setRestoreConfirm(null);
+        try {
+            let content = "";
+            if (file.status !== "removed") {
+                content = await fetchFileAtRef(file.path, commitDetails.sha);
+            }
+            const isRemoved = file.status === "removed";
+            const targetPath = file.path;
+            const previousPath = file.previousPath;
+
+            if (isRemoved) {
+                // Delete file at targetPath from workspace if exists
+                const all = flattenNotes(folders, rootDocuments);
+                const existing = all.find((d) => d.path === targetPath);
+                if (existing) {
+                    const { folders: nf, rootDocs: nr } = removeDocument(folders, rootDocuments, existing.id);
+                    setFolders(nf);
+                    setRootDocuments(nr);
+                    if (selectedDocument?.id === existing.id) {
+                        const remaining = flattenNotes(nf, nr);
+                        setSelectedDocument(remaining[0] ?? null);
+                    }
+                }
+                toast.success("File removed from workspace", { description: targetPath });
+                return;
+            }
+
+            // For renamed, also remove previousPath if exists and different
+            if (file.status === "renamed" && previousPath && previousPath !== targetPath) {
+                const all = flattenNotes(folders, rootDocuments);
+                const prev = all.find((d) => d.path === previousPath);
+                if (prev) {
+                    const { folders: nf, rootDocs: nr } = removeDocument(folders, rootDocuments, prev.id);
+                    setFolders(nf);
+                    setRootDocuments(nr);
+                }
+            }
+
+            // Upsert file at targetPath with historical content
+            const allNow = flattenNotes(folders, rootDocuments);
+            const existing = allNow.find((d) => d.path === targetPath);
+            const note: Note = {
+                id: `github-file:${selectedRepository.fullName}:${targetPath}`,
+                name: targetPath.split("/").pop() ?? targetPath,
+                path: targetPath,
+                content,
+            };
+            if (existing) {
+                // update content
+                const updated = { ...existing, content, name: note.name };
+                setFolders((prev) => updateDocumentInFolders(prev, updated));
+                setRootDocuments((prev) => prev.map((d) => (d.id === existing.id ? updated : d)));
+                if (selectedDocument?.id === existing.id) setSelectedDocument(updated);
+            } else {
+                // create
+                const folderPath = targetPath.includes("/") ? targetPath.split("/").slice(0, -1).join("/") : null;
+                if (!folderPath) {
+                    setRootDocuments((prev) => [...prev, note].sort((a, b) => a.name.localeCompare(b.name)));
+                } else {
+                    setFolders((prev) => {
+                        const found = insertIntoFolderTree(prev, folderPath, note);
+                        if (found) return found;
+                        const newFolder: Folder = { id: `github-folder:${selectedRepository.fullName}:${folderPath}`, name: folderPath.split("/").pop() ?? folderPath, documents: [note], folders: [] };
+                        return [...prev, newFolder].sort((a, b) => a.name.localeCompare(b.name));
+                    });
+                }
+                setSelectedDocument(note);
+            }
+            setViewMode("editor");
+            toast.success("File restored to workspace", { description: targetPath });
+        } catch (e) {
+            toast.error(e instanceof Error ? e.message : "Unable to restore file");
+        }
+    }
+
     async function handleLogout() {
         await fetch("/api/github/logout", { method: "POST" });
-        // Keep preference for next login (cross-device) - only clear local if you want truly fresh
-        // To clear cross-device too, uncomment: await fetch("/api/github/selected-repo", { method: "DELETE" }).catch(()=>{});
         try { localStorage.removeItem("gitnote:selectedRepo"); } catch {}
         setAccount(null);
         setRepositories([]);
@@ -794,10 +1253,29 @@ export function AppShell() {
         setSelectedDocument(null);
         setRootDocuments([]);
         setFolders(initialFolders);
+        setOriginalSnapshot([]);
+        setSelectedChange(null);
+        setViewMode("editor");
+        setOriginalLoadingIds(new Set());
+        setOriginalErrors(new Map());
+        originalFetchingRef.current.clear();
+        setHistoryCommits([]);
+        setFileHistoryCommits([]);
+        setFileHistoryLoading(false);
+        setFileHistoryError(null);
+        setHistoryLoading(false);
+        setHistoryFilterPath(null);
+        setHistoryError(null);
+        setSelectedHistorySha(null);
+        setCommitDetails(null);
+        setSelectedHistoryFile(null);
+        setHistoricalDiff(null);
+        historyCache.current.clear();
+        commitDetailsCache.current.clear();
+        fileContentCache.current.clear();
         setGithubError(null);
         setSaveStatus("saved");
         setLastSavedContent("");
-        setHasWorkspaceChanges(false);
     }
 
     const sidebarStatus = treeLoading
@@ -819,14 +1297,22 @@ export function AppShell() {
         !!selectedDocument &&
         selectedDocument.content !== lastSavedContent;
 
-    const breadcrumbs = selectedDocument
-        ? [selectedRepository?.name ?? workspaceLabel, selectedDocument.name]
-        : selectedRepository
-            ? [workspaceLabel, selectedRepository.name]
-            : [workspaceLabel];
+    const breadcrumbs =
+        viewMode === "history"
+            ? [workspaceLabel, selectedRepository?.name ?? "History", "History"]
+            : viewMode === "commit" && commitDetails
+                ? [workspaceLabel, selectedRepository?.name ?? "History", commitDetails.sha.slice(0, 7)]
+                : viewMode === "historyDiff" && historicalDiff
+                    ? [workspaceLabel, selectedRepository?.name ?? "History", commitDetails?.sha.slice(0, 7) ?? "Commit", historicalDiff.path]
+                    : viewMode === "diff" && selectedChange
+                        ? [selectedRepository?.name ?? workspaceLabel, selectedChange.path]
+                        : selectedDocument
+                            ? [selectedRepository?.name ?? workspaceLabel, selectedDocument.name]
+                            : selectedRepository
+                                ? [workspaceLabel, selectedRepository.name]
+                                : [workspaceLabel];
 
-    const gitStatus: "Synced" | "Modified" | "Untracked" =
-        hasWorkspaceChanges ? "Modified" : saveStatus === "unsaved" || saveStatus === "error" ? "Modified" : saveStatus === "saving" ? "Modified" : "Synced";
+    const gitStatus: "Synced" | "Modified" | "Untracked" = changes.length > 0 || saveStatus === "unsaved" || saveStatus === "error" || saveStatus === "saving" ? "Modified" : "Synced";
 
     return (
         <div className="flex h-screen w-full overflow-hidden bg-background">
@@ -841,6 +1327,10 @@ export function AppShell() {
                         repoName={selectedRepository?.name ?? null}
                         repoBranch={selectedRepository?.defaultBranch ?? null}
                         repoStatus={gitStatus}
+                        changes={changes}
+                        selectedChangeId={selectedChange?.id ?? null}
+                        changesCollapsed={changesCollapsed}
+                        repoConnected={!!selectedRepository}
                         action={
                             account ? (
                                 <button type="button" onClick={handleLogout} className="rounded-md px-2 py-1 text-xs text-chrome-muted hover:bg-chrome-hover hover:text-chrome-foreground">
@@ -861,18 +1351,136 @@ export function AppShell() {
                         onDeleteDocument={(doc) => setDeleteDoc(doc)}
                         onRenameFolder={(folder) => setRenameFolderTarget(folder)}
                         onDeleteFolder={(folder) => setDeleteFolderTarget(folder)}
+                        onSelectChange={handleSelectChange}
+                        onToggleChanges={() => setChangesCollapsed((v) => !v)}
+                        historyCommits={historyCommits}
+                        selectedHistorySha={selectedHistorySha}
+                        historyLoading={historyLoading}
+                        historyError={historyError}
+                        historyCollapsed={historyCollapsed}
+                        onSelectHistoryCommit={(sha) => void handleSelectHistoryCommit(sha)}
+                        onToggleHistory={() => setHistoryCollapsed((v) => !v)}
+                        onRetryHistory={() => void fetchHistory(true)}
                     />
                 </div>
             </aside>
 
             <div className="flex min-w-0 flex-1 flex-col">
-                <TopBar breadcrumbs={breadcrumbs} status={gitStatus} onToggleSidebar={() => setSidebarOpen((v) => !v)} onTogglePanel={() => setPanelOpen((v) => !v)} onSearch={() => setSearchOpen(true)} accountLogin={account?.login ?? null} />
+                <TopBar breadcrumbs={breadcrumbs} status={gitStatus} onToggleSidebar={() => setSidebarOpen((v) => !v)} onTogglePanel={() => setPanelOpen((v) => !v)} onSearch={() => setSearchOpen(true)} accountLogin={account?.login ?? null} onToggleHistory={handleToggleHistory} historyActive={viewMode === "history" || viewMode === "commit" || viewMode === "historyDiff"} />
 
-                <div className={cn("flex min-h-0 flex-1", selectedDocument ? "bg-editor" : "bg-background")}>
+                <div className={cn("flex min-h-0 flex-1", selectedDocument || viewMode === "diff" || viewMode === "historyDiff" ? "bg-editor" : viewMode === "history" || viewMode === "commit" ? "bg-chrome" : "bg-background")}>
                     <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                        <div className={cn("flex flex-1 flex-col", selectedDocument ? "overflow-hidden" : "overflow-y-auto")}>
+                        <div className={cn("flex flex-1 flex-col", selectedDocument || viewMode === "diff" || viewMode === "historyDiff" || viewMode === "commit" ? "overflow-hidden" : "overflow-y-auto")}>
                     {documentLoading ? (
                         <div className="flex flex-1 items-center justify-center"><p className="text-sm text-chrome-muted">Loading document…</p></div>
+                    ) : viewMode === "history" ? (
+                        <div className="scroll-thin flex-1 overflow-y-auto bg-chrome">
+                            <div className="mx-auto max-w-3xl px-6 py-6">
+                                <div className="mb-4 flex items-center justify-between">
+                                    <h2 className="font-display text-lg font-semibold">History</h2>
+                                    <button type="button" onClick={() => setViewMode("editor")} className="rounded-md border border-chrome-border bg-chrome px-3 py-1 text-xs hover:bg-chrome-hover">Back to editor</button>
+                                </div>
+                                <div className="mb-3 flex gap-1 rounded-lg border border-chrome-border bg-card p-1">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setHistoryFilterPath(null);
+                                            void fetchHistory(null);
+                                        }}
+                                        className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium ${historyFilterPath === null ? "bg-chrome-active text-chrome-foreground shadow-sm" : "text-chrome-muted hover:text-chrome-foreground"}`}
+                                    >
+                                        Repository
+                                    </button>
+                                    {selectedDocument ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const p = selectedDocument.path;
+                                                setHistoryFilterPath(p);
+                                                void fetchHistory(p);
+                                            }}
+                                            className={`flex-1 truncate rounded-md px-3 py-1.5 text-xs font-medium ${historyFilterPath !== null ? "bg-chrome-active text-chrome-foreground shadow-sm" : "text-chrome-muted hover:text-chrome-foreground"}`}
+                                            title={selectedDocument.path}
+                                        >
+                                            {selectedDocument.name}
+                                        </button>
+                                    ) : (
+                                        <button type="button" disabled className="flex-1 rounded-md px-3 py-1.5 text-xs text-chrome-muted opacity-50">
+                                            Select a file
+                                        </button>
+                                    )}
+                                </div>
+                                <div className="rounded-xl border border-chrome-border bg-card shadow-panel">
+                                    <GitHistory
+                                        commits={historyFilterPath ? fileHistoryCommits : historyCommits}
+                                        selectedSha={selectedHistorySha}
+                                        onSelect={(sha) => void handleSelectHistoryCommit(sha)}
+                                        loading={historyFilterPath ? fileHistoryLoading : historyLoading}
+                                        error={historyFilterPath ? fileHistoryError : historyError}
+                                        onRetry={() => void fetchHistory(historyFilterPath, true)}
+                                    />
+                                    {historyFilterPath && !(historyFilterPath ? fileHistoryLoading : historyLoading) && !(historyFilterPath ? fileHistoryError : historyError) && (historyFilterPath ? fileHistoryCommits : historyCommits).length === 0 && (
+                                        <p className="px-4 pb-3 text-xs text-chrome-muted">No commits found for {historyFilterPath}. It may be a new file not yet committed.</p>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    ) : viewMode === "commit" ? (
+                        <div className="flex flex-1 overflow-hidden">
+                            {commitDetails ? (
+                                <div className="flex flex-1">
+                                    <CommitDetails
+                                        commit={commitDetails}
+                                        selectedPath={selectedHistoryFile?.path ?? null}
+                                        onSelectFile={(f) => void handleSelectHistoryFile(f)}
+                                        onRestoreCommit={() => {
+                                            if (changes.length > 0) setRestoreConfirm({ type: "commit" });
+                                            else void handleRestoreCommit();
+                                        }}
+                                        onRestoreFile={(f) => {
+                                            if (changes.length > 0) setRestoreConfirm({ type: "file", file: f });
+                                            else void handleRestoreFile(f);
+                                        }}
+                                        loading={commitDetailsLoading}
+                                        error={commitDetailsError}
+                                        onRetry={() => selectedHistorySha && void handleSelectHistoryCommit(selectedHistorySha)}
+                                        onBack={() => setViewMode("history")}
+                                    />
+                                </div>
+                            ) : (
+                                <div className="flex flex-1 items-center justify-center p-8 text-sm text-chrome-muted">
+                                    {commitDetailsLoading ? "Loading commit details..." : commitDetailsError ?? "Select a commit"}
+                                </div>
+                            )}
+                        </div>
+                    ) : viewMode === "historyDiff" && historicalDiff ? (
+                        <DiffViewer
+                            path={historicalDiff.path}
+                            oldPath={historicalDiff.oldPath}
+                            type={historicalDiff.status === "added" ? "added" : historicalDiff.status === "removed" ? "deleted" : historicalDiff.status === "renamed" ? "renamed" : "modified"}
+                            oldContent={historicalDiff.oldContent}
+                            content={historicalDiff.newContent}
+                            isModifiedAfterRename={historicalDiff.status === "renamed" && historicalDiff.oldContent !== historicalDiff.newContent}
+                            isLoadingOriginal={historicalDiff.loading}
+                            originalError={historicalDiff.error}
+                            onRetry={() => selectedHistoryFile && void handleSelectHistoryFile(selectedHistoryFile)}
+                            onClose={() => setViewMode("commit")}
+                            onCommit={undefined}
+                        />
+                    ) : viewMode === "diff" && selectedChange ? (
+                        <DiffViewer
+                            path={selectedChange.path}
+                            oldPath={selectedChange.oldPath}
+                            type={selectedChange.type}
+                            oldContent={selectedChange.oldContent}
+                            content={selectedChange.content}
+                            isModifiedAfterRename={selectedChange.isModifiedAfterRename}
+                            isLoadingOriginal={originalLoadingIds.has(selectedChange.id) || (selectedChange.type !== "added" && !selectedChange.oldContent && !originalErrors.has(selectedChange.id) && (originalSnapshot.find((d) => d.id === selectedChange.id)?.content ?? "") === "")}
+                            originalError={originalErrors.get(selectedChange.id) ?? null}
+                            onRetry={() => handleRetryOriginal(selectedChange)}
+                            onClose={() => setViewMode("editor")}
+                            onCommit={() => { setCommitMessage(`Update ${selectedChange.path}`); setCommitError(null); setCommitDialogOpen(true); }}
+                        />
                     ) : selectedDocument ? (
                         <div className="flex h-full w-full flex-1">
                             <Editor
@@ -886,16 +1494,6 @@ export function AppShell() {
                                 onChange={handleContentChange}
                                 onSave={handleSaveClick}
                                 onHeadingsChange={setHeadings}
-                            />
-                            <CommitDialog
-                                open={commitDialogOpen}
-                                fileName={selectedDocument.name}
-                                message={commitMessage}
-                                onMessageChange={setCommitMessage}
-                                saving={saveStatus === "saving"}
-                                error={commitError}
-                                onClose={() => { if (saveStatus !== "saving") { setCommitDialogOpen(false); setCommitError(null); } }}
-                                onCommit={(msg) => void handleCommit(msg)}
                             />
                             {saveStatus === "error" && !commitDialogOpen && commitError && (
                                 <div className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2 rounded-md bg-destructive px-4 py-2 text-sm text-destructive-foreground shadow-float">
@@ -942,6 +1540,17 @@ export function AppShell() {
                     )}
                 </div>
             </div>
+            <CommitDialog
+                open={commitDialogOpen}
+                fileName={selectedChange?.path ?? selectedDocument?.name ?? (changes.length > 0 ? `${changes.length} files` : "")}
+                message={commitMessage}
+                changes={changes}
+                onMessageChange={setCommitMessage}
+                saving={saveStatus === "saving"}
+                error={commitError}
+                onClose={() => { if (saveStatus !== "saving") { setCommitDialogOpen(false); setCommitError(null); } }}
+                onCommit={(msg) => void handleCommit(msg)}
+            />
             <SearchCommand open={searchOpen} onOpenChange={setSearchOpen} folders={folders} documents={rootDocuments} onSelectDocument={(d) => void handleSelectDocument(d)} onNewDocument={() => { setNewDocInitialFolder(null); setNewDocOpen(true); }} onToggleSidebar={() => setSidebarOpen((v) => !v)} />
             <NewDocumentModal open={newDocOpen} onOpenChange={setNewDocOpen} folders={folders} documents={rootDocuments} onCreate={handleCreateDocument} repoConnected={!!selectedRepository} initialFolder={newDocInitialFolder} />
             <NewFolderModal open={newFolderOpen} onOpenChange={setNewFolderOpen} folders={folders} onCreate={handleCreateFolder} initialParent={newFolderInitialParent} />
@@ -950,6 +1559,22 @@ export function AppShell() {
             <MoveDocumentModal open={!!moveDoc} onOpenChange={(v) => !v && setMoveDoc(null)} folders={folders} document={moveDoc} onMove={handleMoveDocument} />
             <ConfirmDialog open={!!deleteDoc} onOpenChange={(v) => !v && setDeleteDoc(null)} title="Delete document?" description="This action will remove the document from your GitNote workspace." confirmLabel="Delete" onConfirm={handleDeleteDocument} />
             <ConfirmDialog open={!!deleteFolderTarget} onOpenChange={(v) => !v && setDeleteFolderTarget(null)} title="Delete folder?" description={deleteFolderTarget ? `This will remove “${deleteFolderTarget.name}” and all its documents from your workspace.` : "This will remove the folder."} confirmLabel="Delete" onConfirm={handleDeleteFolder} />
+            <ConfirmDialog
+                open={restoreConfirm?.type === "commit"}
+                onOpenChange={(v) => !v && setRestoreConfirm(null)}
+                title="Restore this commit?"
+                description={changes.length > 0 ? "You have uncommitted changes. This will replace your current workspace with the version from this commit. Your current changes will not be committed. Continue?" : "This will replace your current workspace with the version from this commit. Your current changes will not be committed."}
+                confirmLabel="Restore"
+                onConfirm={() => void handleRestoreCommit()}
+            />
+            <ConfirmDialog
+                open={restoreConfirm?.type === "file"}
+                onOpenChange={(v) => !v && setRestoreConfirm(null)}
+                title="Restore this file?"
+                description={changes.length > 0 ? "You have uncommitted changes. This will replace the current version in your workspace. Your current changes will remain uncommitted. Continue?" : "This will replace the current version in your workspace."}
+                confirmLabel="Restore"
+                onConfirm={() => restoreConfirm?.file && void handleRestoreFile(restoreConfirm.file)}
+            />
             <Toaster richColors position="top-right" />
         </div>
     );
@@ -1077,7 +1702,6 @@ function insertIntoFolderTree(folders: Folder[], folderPath: string, note: Note)
     // Returns new tree if inserted, null if folderPath not found
     let inserted = false;
     const next = folders.map((f) => {
-        const currentPath = f.name;
         // For simplicity, match by folder name or by id suffix; we treat top-level name as path segment
         // Recurse if folderPath starts with this folder's name
         if (folderPath === f.name || folderPath.startsWith(f.name + "/")) {
