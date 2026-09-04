@@ -209,30 +209,31 @@ export function Sidebar({
 
           {repoConnected && (
             <div className="rounded-lg border border-chrome-border bg-chrome-hover/30">
-              <HistoryHeader count={historyCommits.length} collapsed={historyCollapsed} onToggle={() => onToggleHistory?.()} />
-              {!historyCollapsed && (
-                <div className="border-t border-chrome-border max-h-[320px] overflow-y-auto scroll-thin">
-                  <GitHistory commits={historyCommits} selectedSha={selectedHistorySha} onSelect={(sha) => onSelectHistoryCommit?.(sha)} loading={historyLoading} error={historyError} onRetry={onRetryHistory} />
-                </div>
-              )}
-            </div>
-          )}
-
-          {repoConnected && selectedDocumentPath && (
-            <div className="rounded-lg border border-chrome-border bg-chrome-hover/30">
               <button type="button" onClick={() => onToggleFileHistory?.()} className="flex w-full items-center justify-between px-3 py-2 text-left hover:bg-chrome-hover">
                 <span className="flex items-center gap-2 min-w-0">
-                  <span className="label-caps text-chrome-muted truncate">File History</span>
-                  <span className="truncate font-mono text-[11px] text-chrome-muted">{selectedDocumentPath.split("/").pop()}</span>
-                  <span className="rounded-full bg-chrome-active px-1.5 py-0.5 font-mono text-[11px] text-chrome-muted">{fileHistoryCommits.length}</span>
+                  <span className="label-caps text-chrome-muted truncate">{selectedDocumentPath ? "File History" : "History"}</span>
+                  {selectedDocumentPath ? (
+                    <>
+                      <span className="truncate font-mono text-[11px] text-chrome-muted">{selectedDocumentPath.split("/").pop()}</span>
+                      <span className="rounded-full bg-chrome-active px-1.5 py-0.5 font-mono text-[11px] text-chrome-muted">{fileHistoryCommits.length}</span>
+                    </>
+                  ) : (
+                    <span className="rounded-full bg-chrome-active px-1.5 py-0.5 font-mono text-[11px] text-chrome-muted">{fileHistoryCommits.length}</span>
+                  )}
                 </span>
                 <span className="text-[11px] text-chrome-muted shrink-0">{fileHistoryCollapsed ? "Show" : "Hide"}</span>
               </button>
               {!fileHistoryCollapsed && (
                 <div className="border-t border-chrome-border max-h-[320px] overflow-y-auto scroll-thin">
-                  <GitHistory commits={fileHistoryCommits} selectedSha={selectedHistorySha} onSelect={(sha) => onSelectHistoryCommit?.(sha)} loading={fileHistoryLoading} error={fileHistoryError} onRetry={onRetryFileHistory} />
-                  {!fileHistoryLoading && !fileHistoryError && fileHistoryCommits.length === 0 && (
-                    <p className="px-3 py-2 text-xs text-chrome-muted">No commits yet for this file. It may be new and not yet committed.</p>
+                  {selectedDocumentPath ? (
+                    <>
+                      <GitHistory commits={fileHistoryCommits} selectedSha={selectedHistorySha} onSelect={(sha) => onSelectHistoryCommit?.(sha)} loading={fileHistoryLoading} error={fileHistoryError} onRetry={onRetryFileHistory} />
+                      {!fileHistoryLoading && !fileHistoryError && fileHistoryCommits.length === 0 && (
+                        <p className="px-3 py-2 text-xs text-chrome-muted">No commits yet for this file. It may be new and not yet committed.</p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="px-3 py-3 text-xs text-chrome-muted">Select a file to see its history.</p>
                   )}
                 </div>
               )}

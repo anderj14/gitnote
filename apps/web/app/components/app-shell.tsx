@@ -1057,9 +1057,14 @@ export function AppShell() {
             return;
         }
         setViewMode("history");
-        // default to repository history; preserve file filter if already set? reset to repo for consistency
-        // keep current filter but ensure history fetched for that filter
-        void fetchHistory();
+        if (selectedDocument) {
+            const p = selectedDocument.path;
+            setHistoryFilterPath(p);
+            void fetchHistory(p);
+        } else {
+            // no file selected, show placeholder - still fetch file history will be empty
+            // keep filter null but main view will show select file message
+        }
     }
 
     function handleToggleHistory() {
@@ -1070,23 +1075,11 @@ export function AppShell() {
         }
     }
 
-    // Auto-fetch repo history for sidebar when repo is selected
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    useEffect(() => {
-        if (selectedRepository) {
-            void fetchHistory(null);
-        }
-    }, [selectedRepository?.fullName]);
-
-    // Auto-fetch file history for sidebar when document selected (so sidebar shows file-specific commits, not 0 repo)
+    // Auto-fetch file history for sidebar/main when document selected (file history only)
     // eslint-disable-next-line react-hooks/exhaustive-deps
     useEffect(() => {
         if (selectedDocument && selectedRepository && selectedDocument.path) {
-            // Only fetch file history if document has been committed before (has source) or to show empty for new files
             void fetchHistory(selectedDocument.path);
-        } else if (!selectedDocument) {
-            // optionally keep previous file history, or clear
-            // keep as is; do not clear to avoid flicker
         }
     }, [selectedDocument?.path, selectedRepository?.fullName]);
 
@@ -1400,47 +1393,27 @@ export function AppShell() {
                                     <h2 className="font-display text-lg font-semibold">History</h2>
                                     <button type="button" onClick={() => setViewMode("editor")} className="rounded-md border border-chrome-border bg-chrome px-3 py-1 text-xs hover:bg-chrome-hover">Back to editor</button>
                                 </div>
-                                <div className="mb-3 flex gap-1 rounded-lg border border-chrome-border bg-card p-1">
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            setHistoryFilterPath(null);
-                                            void fetchHistory(null);
-                                        }}
-                                        className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium ${historyFilterPath === null ? "bg-chrome-active text-chrome-foreground shadow-sm" : "text-chrome-muted hover:text-chrome-foreground"}`}
-                                    >
-                                        Repository
-                                    </button>
-                                    {selectedDocument ? (
-                                        <button
-                                            type="button"
-                                            onClick={() => {
-                                                const p = selectedDocument.path;
-                                                setHistoryFilterPath(p);
-                                                void fetchHistory(p);
-                                            }}
-                                            className={`flex-1 truncate rounded-md px-3 py-1.5 text-xs font-medium ${historyFilterPath !== null ? "bg-chrome-active text-chrome-foreground shadow-sm" : "text-chrome-muted hover:text-chrome-foreground"}`}
-                                            title={selectedDocument.path}
-                                        >
-                                            {selectedDocument.name}
-                                        </button>
-                                    ) : (
-                                        <button type="button" disabled className="flex-1 rounded-md px-3 py-1.5 text-xs text-chrome-muted opacity-50">
-                                            Select a file
-                                        </button>
-                                    )}
+                                <div className="mb-3 flex items-center gap-2">
+                                    <span className="label-caps text-chrome-muted">File History</span>
+                                    {selectedDocument && <span className="font-mono text-xs text-chrome-muted truncate">{selectedDocument.path}</span>}
                                 </div>
                                 <div className="rounded-xl border border-chrome-border bg-card shadow-panel">
-                                    <GitHistory
-                                        commits={historyFilterPath ? fileHistoryCommits : historyCommits}
-                                        selectedSha={selectedHistorySha}
-                                        onSelect={(sha) => void handleSelectHistoryCommit(sha)}
-                                        loading={historyFilterPath ? fileHistoryLoading : historyLoading}
-                                        error={historyFilterPath ? fileHistoryError : historyError}
-                                        onRetry={() => void fetchHistory(historyFilterPath, true)}
-                                    />
-                                    {historyFilterPath && !(historyFilterPath ? fileHistoryLoading : historyLoading) && !(historyFilterPath ? fileHistoryError : historyError) && (historyFilterPath ? fileHistoryCommits : historyCommits).length === 0 && (
-                                        <p className="px-4 pb-3 text-xs text-chrome-muted">No commits found for {historyFilterPath}. It may be a new file not yet committed.</p>
+                                    {selectedDocument ? (
+                                        <>
+                                            <GitHistory
+                                                commits={fileHistoryCommits}
+                                                selectedSha={selectedHistorySha}
+                                                onSelect={(sha) => void handleSelectHistoryCommit(sha)}
+                                                loading={fileHistoryLoading}
+                                                error={fileHistoryError}
+                                                onRetry={() => void fetchHistory(selectedDocument.path, true)}
+                                            />
+                                            {!fileHistoryLoading && !fileHistoryError && fileHistoryCommits.length === 0 && (
+                                                <p className="px-4 pb-3 text-xs text-chrome-muted">No commits yet for this file. It may be new and not yet committed.</p>
+                                            )}
+                                        </>
+                                    ) : (
+                                        <p className="p-6 text-sm text-chrome-muted text-center">Select a file to see its history.</p>
                                     )}
                                 </div>
                             </div>
