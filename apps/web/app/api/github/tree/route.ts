@@ -17,7 +17,11 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const tree = await client.getRepositoryTree({ owner, repo, branch });
+    // If branch looks like a commit SHA, fetch tree at that commit (for history restore)
+    const isSha = /^[a-f0-9]{7,40}$/i.test(branch);
+    const tree = isSha
+      ? await client.getTreeAtCommit({ owner, repo, sha: branch }).catch(() => client.getRepositoryTree({ owner, repo, branch }))
+      : await client.getRepositoryTree({ owner, repo, branch });
 
     return NextResponse.json({ tree });
   } catch {

@@ -8,6 +8,10 @@ import { RepoCard } from "./git-status";
 import { ContextMenuTrigger, DropdownMenu } from "./ui/context-menu";
 import { getFolderPathById } from "@/app/lib/workspace";
 import type { Folder as FolderType, Note } from "./types";
+import type { WorkspaceChange } from "@/app/lib/workspace-changes";
+import { GitChanges, ChangesHeader } from "./git-changes";
+import { GitHistory, HistoryHeader } from "./git-history";
+import type { HistoryCommit } from "./git-history";
 
 type SidebarProps = {
   folders: FolderType[];
@@ -19,6 +23,15 @@ type SidebarProps = {
   repoName?: string | null;
   repoBranch?: string | null;
   repoStatus?: "Synced" | "Modified" | "Untracked";
+  changes?: WorkspaceChange[];
+  selectedChangeId?: string | null;
+  changesCollapsed?: boolean;
+  repoConnected?: boolean;
+  historyCommits?: HistoryCommit[];
+  selectedHistorySha?: string | null;
+  historyLoading?: boolean;
+  historyError?: string | null;
+  historyCollapsed?: boolean;
   onSelectDocument: (note: Note) => void;
   onNewDocument?: () => void;
   onNewFolder?: (parentPath: string | null) => void;
@@ -28,6 +41,11 @@ type SidebarProps = {
   onDeleteDocument?: (note: Note) => void;
   onRenameFolder?: (folder: FolderType) => void;
   onDeleteFolder?: (folder: FolderType) => void;
+  onSelectChange?: (change: WorkspaceChange) => void;
+  onToggleChanges?: () => void;
+  onSelectHistoryCommit?: (sha: string) => void;
+  onToggleHistory?: () => void;
+  onRetryHistory?: () => void;
 };
 
 export function Sidebar({
@@ -40,6 +58,15 @@ export function Sidebar({
   repoName,
   repoBranch,
   repoStatus = "Synced",
+  changes = [],
+  selectedChangeId = null,
+  changesCollapsed = false,
+  repoConnected = false,
+  historyCommits = [],
+  selectedHistorySha = null,
+  historyLoading = false,
+  historyError = null,
+  historyCollapsed = false,
   onSelectDocument,
   onNewDocument,
   onNewFolder,
@@ -49,6 +76,11 @@ export function Sidebar({
   onDeleteDocument,
   onRenameFolder,
   onDeleteFolder,
+  onSelectChange,
+  onToggleChanges,
+  onSelectHistoryCommit,
+  onToggleHistory,
+  onRetryHistory,
 }: SidebarProps) {
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {};
@@ -98,7 +130,7 @@ export function Sidebar({
           { label: "New folder", icon: <FolderPlus className="size-3.5" />, onClick: () => onNewFolder?.(null) },
         ]}
       >
-        <div className="scroll-thin flex-1 overflow-y-auto px-3 pb-4 mt-4">
+        <div className="scroll-thin flex-1 overflow-y-auto px-3 pb-4 mt-4 space-y-4">
           <nav className="space-y-3">
             {documents.length > 0 && (
               <div>
@@ -149,12 +181,34 @@ export function Sidebar({
               <p className="px-2 text-sm text-chrome-muted">No files yet. Right-click to create.</p>
             )}
           </nav>
+
+          {repoConnected && (
+            <div className="rounded-lg border border-chrome-border bg-chrome-hover/30">
+              <ChangesHeader count={changes.length} collapsed={changesCollapsed} onToggle={() => onToggleChanges?.()} />
+              {!changesCollapsed && (
+                <div className="border-t border-chrome-border">
+                  <GitChanges changes={changes} selectedId={selectedChangeId} onSelect={(c) => onSelectChange?.(c)} repoConnected={repoConnected} />
+                </div>
+              )}
+            </div>
+          )}
+
+          {repoConnected && (
+            <div className="rounded-lg border border-chrome-border bg-chrome-hover/30">
+              <HistoryHeader count={historyCommits.length} collapsed={historyCollapsed} onToggle={() => onToggleHistory?.()} />
+              {!historyCollapsed && (
+                <div className="border-t border-chrome-border max-h-[320px] overflow-y-auto scroll-thin">
+                  <GitHistory commits={historyCommits} selectedSha={selectedHistorySha} onSelect={(sha) => onSelectHistoryCommit?.(sha)} loading={historyLoading} error={historyError} onRetry={onRetryHistory} />
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </ContextMenuTrigger>
 
       <div className="shrink-0 space-y-2 border-t border-chrome-border p-3">
         {repoName && repoBranch ? (
-          <RepoCard name={repoName} branch={repoBranch} status={repoStatus} />
+          <RepoCard name={repoName} branch={repoBranch} status={repoStatus} count={changes.length} />
         ) : (
           <div className="rounded-lg border border-dashed border-chrome-border p-3 text-center">
             <p className="text-xs text-chrome-muted">No repository selected</p>

@@ -1,5 +1,5 @@
 "use client";
-import { Github, PanelLeft, PanelRight, Search, Settings } from "lucide-react";
+import { Clock3, Github, PanelLeft, PanelRight, Search, Settings } from "lucide-react";
 import { Breadcrumbs } from "./breadcrumbs";
 import { GitStatus } from "./git-status";
 
@@ -10,6 +10,8 @@ export function TopBar({
   onTogglePanel,
   onSearch,
   accountLogin,
+  onToggleHistory,
+  historyActive,
 }: {
   breadcrumbs: string[];
   status?: "Synced" | "Modified" | "Untracked";
@@ -17,6 +19,8 @@ export function TopBar({
   onTogglePanel?: () => void;
   onSearch?: () => void;
   accountLogin?: string | null;
+  onToggleHistory?: () => void;
+  historyActive?: boolean;
 }) {
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-chrome-border bg-chrome px-3 md:px-4">
@@ -32,6 +36,17 @@ export function TopBar({
       <Breadcrumbs items={breadcrumbs} />
 
       <span className="flex-1" />
+
+      {onToggleHistory && (
+        <button
+          type="button"
+          onClick={onToggleHistory}
+          className={`hidden items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[13px] transition-colors sm:flex ${historyActive ? "border-primary bg-accent text-accent-foreground" : "border-chrome-border bg-chrome text-chrome-muted hover:bg-chrome-hover hover:text-chrome-foreground"}`}
+        >
+          <Clock3 className="size-3.5" />
+          <span>History</span>
+        </button>
+      )}
 
       {onSearch && (
         <>
