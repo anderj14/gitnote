@@ -7,10 +7,25 @@ import { CommitDialog } from "./commit-dialog";
 import { TopBar } from "./top-bar";
 import { SearchCommand } from "./search-command";
 import { NewDocumentModal } from "./new-document-modal";
+import { NewFolderModal } from "./new-folder-modal";
+import { RenameDocumentModal } from "./rename-document-modal";
+import { RenameFolderModal } from "./rename-folder-modal";
+import { MoveDocumentModal } from "./move-document-modal";
+import { ConfirmDialog } from "./confirm-dialog";
 import { RightPanel } from "./right-panel";
-import { Toaster } from "sonner";
+import { Toaster, toast } from "sonner";
 import { cn } from "@/app/lib/utils";
 import type { Folder, Note, SaveStatus } from "./types";
+import {
+  createFolder,
+  renameFolder as renameFolderHelper,
+  deleteFolder as deleteFolderHelper,
+  renameDocument as renameDocumentHelper,
+  moveDocument as moveDocumentHelper,
+  removeDocument,
+  flattenNotes,
+  getFolderPathById,
+} from "@/app/lib/workspace";
 
 const initialFolders: Folder[] = [
     {
@@ -152,6 +167,9 @@ export function AppShell() {
     const [sidebarOpen, setSidebarOpen] = useState(true);
     const [searchOpen, setSearchOpen] = useState(false);
     const [newDocOpen, setNewDocOpen] = useState(false);
+    const [newDocInitialFolder, setNewDocInitialFolder] = useState<string | null>(null);
+    const [newFolderOpen, setNewFolderOpen] = useState(false);
+    const [newFolderInitialParent, setNewFolderInitialParent] = useState<string | null>(null);
     const [editorTheme, setEditorTheme] = useState<"light" | "dark">("light");
     const [panelOpen, setPanelOpen] = useState(true);
     const [selectedDocument, setSelectedDocument] = useState<Note | null>(null);
@@ -174,6 +192,14 @@ export function AppShell() {
     const [commitError, setCommitError] = useState<string | null>(null);
     const [commitMessage, setCommitMessage] = useState("");
     const [headings, setHeadings] = useState<{ id: string; text: string; level: number }[]>([]);
+    const [hasWorkspaceChanges, setHasWorkspaceChanges] = useState(false);
+
+    // CRUD modals
+    const [renameDoc, setRenameDoc] = useState<Note | null>(null);
+    const [moveDoc, setMoveDoc] = useState<Note | null>(null);
+    const [deleteDoc, setDeleteDoc] = useState<Note | null>(null);
+    const [renameFolderTarget, setRenameFolderTarget] = useState<Folder | null>(null);
+    const [deleteFolderTarget, setDeleteFolderTarget] = useState<Folder | null>(null);
 
     // Keep ref in sync for stable comparison in callbacks without re-renders
     useEffect(() => {
@@ -268,7 +294,8 @@ export function AppShell() {
             const mod = e.metaKey || e.ctrlKey;
             if (!mod) return;
             if (e.key.toLowerCase() === "k") { e.preventDefault(); setSearchOpen(true); }
-            else if (e.key.toLowerCase() === "n") { e.preventDefault(); setNewDocOpen(true); }
+            else if (e.key.toLowerCase() === "n" && e.shiftKey) { e.preventDefault(); setNewFolderOpen(true); setNewFolderInitialParent(null); }
+            else if (e.key.toLowerCase() === "n") { e.preventDefault(); setNewDocOpen(true); setNewDocInitialFolder(null); }
             else if (e.key.toLowerCase() === "b") { e.preventDefault(); setSidebarOpen((v) => !v); }
             else if (e.key === ".") { e.preventDefault(); setPanelOpen((v) => !v); }
             else if (e.key.toLowerCase() === "l" && e.shiftKey) { e.preventDefault(); setEditorTheme((t) => (t === "light" ? "dark" : "light")); }
@@ -293,10 +320,14 @@ export function AppShell() {
         // Local docs: persist in folders (no GitHub save)
         if (!selectedDocument.source) {
             setFolders((currentFolders) => updateDocumentInFolders(currentFolders, updatedDocument));
+            // Also update root docs if needed
+            setRootDocuments((prev) => prev.map((d) => d.id === updatedDocument.id ? updatedDocument : d));
             return;
         }
 
-        // GitHub docs: track unsaved vs saved
+        // GitHub docs: track unsaved vs saved — also update tree content so search reflects? Keep content in tree.
+        setFolders((prev) => updateDocumentInFolders(prev, updatedDocument));
+        setRootDocuments((prev) => prev.map((d) => d.id === updatedDocument.id ? updatedDocument : d));
         if (content === lastSavedContentRef.current) {
             setSaveStatus("saved");
         } else {
@@ -318,32 +349,173 @@ export function AppShell() {
 
         if (!selectedDocument.source) {
             setFolders((currentFolders) => updateDocumentInFolders(currentFolders, updatedDocument));
+            setRootDocuments((prev) => prev.map((d) => d.id === updatedDocument.id ? updatedDocument : d));
         }
         // For GitHub docs, name is filename — renaming not committed via updateFile.
         // We intentionally don't flip saveStatus for name alone (commit is for markdown content).
     }
 
     function handleCreateDocument(note: Note) {
-        // If repo connected, we'd need to commit new file via GitHub API; for now treat as local until saved
-        // Insert into appropriate folder or root
         const path = note.path;
         const folderPath = path.includes("/") ? path.split("/").slice(0, -1).join("/") : null;
 
         if (!folderPath) {
             setRootDocuments((prev) => [...prev, note].sort((a, b) => a.name.localeCompare(b.name)));
         } else {
-            // Try to insert into existing folder tree, else create top-level folder
             setFolders((prev) => {
                 const found = insertIntoFolderTree(prev, folderPath, note);
                 if (found) return found;
-                // Create new folder at top level
-                const newFolder: Folder = { id: `local-folder:${folderPath}`, name: folderPath.split("/").pop() ?? folderPath, documents: [note], folders: [] };
+                const newFolder: Folder = { id: crypto.randomUUID(), name: folderPath.split("/").pop() ?? folderPath, documents: [note], folders: [] };
                 return [...prev, newFolder].sort((a, b) => a.name.localeCompare(b.name));
             });
         }
         setSelectedDocument(note);
         setLastSavedContent(note.content);
         setSaveStatus("saved");
+        setHasWorkspaceChanges(true);
+        toast.success("Document created", { description: note.path });
+    }
+
+    function handleCreateFolder(name: string, parentPath: string | null) {
+        const result = createFolder(folders, parentPath, name);
+        if (result.error) {
+            toast.error(result.error);
+            return;
+        }
+        setFolders(result.folders);
+        setHasWorkspaceChanges(true);
+        setNewFolderOpen(false);
+        toast.success("Folder created", { description: parentPath ? `${parentPath}/${name}` : name });
+    }
+
+    function handleRenameDocument(newName: string) {
+        if (!renameDoc) return;
+        const result = renameDocumentHelper(folders, rootDocuments, renameDoc.id, newName);
+        if (result.error || !result.renamed) {
+            toast.error(result.error ?? "Unable to rename document");
+            return;
+        }
+        setFolders(result.folders);
+        setRootDocuments(result.rootDocs);
+        if (selectedDocument?.id === result.renamed.id) {
+            setSelectedDocument(result.renamed);
+        }
+        setHasWorkspaceChanges(true);
+        setRenameDoc(null);
+        toast.success("Document renamed", { description: result.renamed.path });
+    }
+
+    function handleDeleteDocument() {
+        if (!deleteDoc) return;
+        const { folders: nextFolders, rootDocs: nextRoot, removed } = removeDocument(folders, rootDocuments, deleteDoc.id);
+        if (!removed) {
+            toast.error("Unable to delete document");
+            setDeleteDoc(null);
+            return;
+        }
+        setFolders(nextFolders);
+        setRootDocuments(nextRoot);
+        // handle selection
+        if (selectedDocument?.id === deleteDoc.id) {
+            const remaining = flattenNotes(nextFolders, nextRoot);
+            if (remaining.length > 0) {
+                const next = remaining[0];
+                // load content if needed via handleSelectDocument flow but for local we can set directly; for GitHub we need to fetch
+                if (!next.source) {
+                    setSelectedDocument(next);
+                    setLastSavedContent(next.content);
+                    setSaveStatus("saved");
+                } else {
+                    // Use handleSelectDocument to fetch content
+                    void handleSelectDocument(next);
+                }
+            } else {
+                setSelectedDocument(null);
+                setLastSavedContent("");
+                setSaveStatus("saved");
+            }
+        }
+        setHasWorkspaceChanges(true);
+        setDeleteDoc(null);
+        toast.success("Document deleted");
+    }
+
+    function handleMoveDocument(dest: string | null) {
+        if (!moveDoc) return;
+        const result = moveDocumentHelper(folders, rootDocuments, moveDoc.id, dest);
+        if (!result.moved) {
+            toast.error("Unable to move document");
+            return;
+        }
+        setFolders(result.folders);
+        setRootDocuments(result.rootDocs);
+        if (selectedDocument?.id === result.moved.id) {
+            setSelectedDocument(result.moved);
+        }
+        // also update moveDoc reference
+        setHasWorkspaceChanges(true);
+        setMoveDoc(null);
+        toast.success("Document moved", { description: result.moved.path });
+    }
+
+    function handleRenameFolder(newName: string) {
+        if (!renameFolderTarget) return;
+        const result = renameFolderHelper(folders, renameFolderTarget.id, newName);
+        if (result.error) {
+            toast.error(result.error);
+            return;
+        }
+        setFolders(result.folders);
+        // Update selectedDocument if it was inside renamed folder
+        if (selectedDocument && result.oldPath && result.newPath) {
+            if (selectedDocument.path === result.oldPath || selectedDocument.path.startsWith(result.oldPath + "/")) {
+                const newDocPath = selectedDocument.path.replace(result.oldPath, result.newPath);
+                const updated = { ...selectedDocument, path: newDocPath, name: selectedDocument.name, source: selectedDocument.source ? { ...selectedDocument.source, path: newDocPath } : undefined };
+                // Need to find actual updated doc from tree to keep correct id; easiest re-find
+                const all = flattenNotes(result.folders, rootDocuments);
+                const found = all.find((d) => d.id === selectedDocument.id);
+                if (found) setSelectedDocument(found);
+                else setSelectedDocument(updated);
+            }
+        }
+        // Also need to update rootDocuments paths if they were inside? root docs never inside folder, so no.
+        setHasWorkspaceChanges(true);
+        setRenameFolderTarget(null);
+        toast.success("Folder renamed", { description: newName });
+    }
+
+    function handleDeleteFolder() {
+        if (!deleteFolderTarget) return;
+        const targetId = deleteFolderTarget.id;
+        const folderPath = getFolderPathById(folders, targetId);
+        const { folders: nextFolders, removed } = deleteFolderHelper(folders, targetId);
+        if (!removed) {
+            toast.error("Unable to delete folder");
+            setDeleteFolderTarget(null);
+            return;
+        }
+        setFolders(nextFolders);
+        // If selectedDocument was inside deleted folder, clear selection
+        if (selectedDocument && folderPath && (selectedDocument.path === folderPath || selectedDocument.path.startsWith(folderPath + "/"))) {
+            const remaining = flattenNotes(nextFolders, rootDocuments);
+            if (remaining.length > 0) {
+                const next = remaining[0];
+                if (!next.source) {
+                    setSelectedDocument(next);
+                    setLastSavedContent(next.content);
+                    setSaveStatus("saved");
+                } else {
+                    void handleSelectDocument(next);
+                }
+            } else {
+                setSelectedDocument(null);
+                setLastSavedContent("");
+                setSaveStatus("saved");
+            }
+        }
+        setHasWorkspaceChanges(true);
+        setDeleteFolderTarget(null);
+        toast.success("Folder deleted");
     }
 
     // Save → Commit dialog
@@ -443,6 +615,7 @@ export function AppShell() {
         setGithubError(null);
         setSaveStatus("saved");
         setLastSavedContent("");
+        setHasWorkspaceChanges(false);
         // Persist selection cross-device (Supabase) + fallback localStorage
         try { localStorage.setItem("gitnote:selectedRepo", JSON.stringify({ owner: repository.owner, repo: repository.name, branch: repository.defaultBranch })); } catch {}
         void fetch("/api/github/selected-repo", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ owner: repository.owner, repo: repository.name, branch: repository.defaultBranch }) }).catch(() => {});
@@ -536,6 +709,7 @@ export function AppShell() {
         setGithubError(null);
         setSaveStatus("saved");
         setLastSavedContent("");
+        setHasWorkspaceChanges(false);
     }
 
     const sidebarStatus = treeLoading
@@ -564,7 +738,7 @@ export function AppShell() {
             : [workspaceLabel];
 
     const gitStatus: "Synced" | "Modified" | "Untracked" =
-        saveStatus === "unsaved" || saveStatus === "error" ? "Modified" : saveStatus === "saving" ? "Modified" : "Synced";
+        hasWorkspaceChanges ? "Modified" : saveStatus === "unsaved" || saveStatus === "error" ? "Modified" : saveStatus === "saving" ? "Modified" : "Synced";
 
     return (
         <div className="flex h-screen w-full overflow-hidden bg-background">
@@ -578,6 +752,7 @@ export function AppShell() {
                         status={sidebarStatus}
                         repoName={selectedRepository?.name ?? null}
                         repoBranch={selectedRepository?.defaultBranch ?? null}
+                        repoStatus={gitStatus}
                         action={
                             account ? (
                                 <button type="button" onClick={handleLogout} className="rounded-md px-2 py-1 text-xs text-chrome-muted hover:bg-chrome-hover hover:text-chrome-foreground">
@@ -590,7 +765,14 @@ export function AppShell() {
                             )
                         }
                         onSelectDocument={(document) => { void handleSelectDocument(document); }}
-                        onNewDocument={() => setNewDocOpen(true)}
+                        onNewDocument={() => { setNewDocInitialFolder(null); setNewDocOpen(true); }}
+                        onNewFolder={(parentPath) => { setNewFolderInitialParent(parentPath); setNewFolderOpen(true); }}
+                        onNewDocumentAt={(folderPath) => { setNewDocInitialFolder(folderPath); setNewDocOpen(true); }}
+                        onRenameDocument={(doc) => setRenameDoc(doc)}
+                        onMoveDocument={(doc) => setMoveDoc(doc)}
+                        onDeleteDocument={(doc) => setDeleteDoc(doc)}
+                        onRenameFolder={(folder) => setRenameFolderTarget(folder)}
+                        onDeleteFolder={(folder) => setDeleteFolderTarget(folder)}
                     />
                 </div>
             </aside>
@@ -672,8 +854,14 @@ export function AppShell() {
                     )}
                 </div>
             </div>
-            <SearchCommand open={searchOpen} onOpenChange={setSearchOpen} folders={folders} documents={rootDocuments} onSelectDocument={(d) => void handleSelectDocument(d)} onNewDocument={() => setNewDocOpen(true)} onToggleSidebar={() => setSidebarOpen((v) => !v)} />
-            <NewDocumentModal open={newDocOpen} onOpenChange={setNewDocOpen} folders={folders} documents={rootDocuments} onCreate={handleCreateDocument} repoConnected={!!selectedRepository} />
+            <SearchCommand open={searchOpen} onOpenChange={setSearchOpen} folders={folders} documents={rootDocuments} onSelectDocument={(d) => void handleSelectDocument(d)} onNewDocument={() => { setNewDocInitialFolder(null); setNewDocOpen(true); }} onToggleSidebar={() => setSidebarOpen((v) => !v)} />
+            <NewDocumentModal open={newDocOpen} onOpenChange={setNewDocOpen} folders={folders} documents={rootDocuments} onCreate={handleCreateDocument} repoConnected={!!selectedRepository} initialFolder={newDocInitialFolder} />
+            <NewFolderModal open={newFolderOpen} onOpenChange={setNewFolderOpen} folders={folders} onCreate={handleCreateFolder} initialParent={newFolderInitialParent} />
+            <RenameDocumentModal open={!!renameDoc} onOpenChange={(v) => !v && setRenameDoc(null)} currentName={renameDoc?.name ?? ""} onRename={handleRenameDocument} />
+            <RenameFolderModal open={!!renameFolderTarget} onOpenChange={(v) => !v && setRenameFolderTarget(null)} currentName={renameFolderTarget?.name ?? ""} onRename={handleRenameFolder} />
+            <MoveDocumentModal open={!!moveDoc} onOpenChange={(v) => !v && setMoveDoc(null)} folders={folders} document={moveDoc} onMove={handleMoveDocument} />
+            <ConfirmDialog open={!!deleteDoc} onOpenChange={(v) => !v && setDeleteDoc(null)} title="Delete document?" description="This action will remove the document from your GitNote workspace." confirmLabel="Delete" onConfirm={handleDeleteDocument} />
+            <ConfirmDialog open={!!deleteFolderTarget} onOpenChange={(v) => !v && setDeleteFolderTarget(null)} title="Delete folder?" description={deleteFolderTarget ? `This will remove “${deleteFolderTarget.name}” and all its documents from your workspace.` : "This will remove the folder."} confirmLabel="Delete" onConfirm={handleDeleteFolder} />
             <Toaster richColors position="top-right" />
         </div>
     );

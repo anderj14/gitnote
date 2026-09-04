@@ -322,6 +322,77 @@ export class GitHubClient {
     };
   }
 
+  async createFile(params: {
+    owner: string;
+    repo: string;
+    path: string;
+    content: string;
+    message: string;
+    branch: string;
+  }): Promise<GitHubUpdateFileResult> {
+    const encodedContent = Buffer.from(params.content, "utf8").toString("base64");
+    const data = await this.request<GitHubUpdateContentsResponse>(
+      `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${encodePath(params.path)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          message: params.message,
+          content: encodedContent,
+          branch: params.branch,
+        }),
+      },
+    );
+    return { sha: data.content.sha, path: data.content.path };
+  }
+
+  async ensureReadme(params: {
+    owner: string;
+    repo: string;
+    branch: string;
+    content: string;
+    message: string;
+  }): Promise<void> {
+    // Try to overwrite existing README from auto_init, else create
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const existing = await this.getFile({
+          owner: params.owner,
+          repo: params.repo,
+          path: "README.md",
+          ref: params.branch,
+        });
+        await this.updateFile({
+          owner: params.owner,
+          repo: params.repo,
+          path: "README.md",
+          content: params.content,
+          sha: existing.sha,
+          message: params.message,
+          branch: params.branch,
+        });
+        return;
+      } catch (e) {
+        const status = e instanceof GitHubApiError ? e.status : 0;
+        // 404 = not yet created (auto_init not finished or empty repo) -> try create
+        if (status === 404) {
+          try {
+            await this.createFile({
+              owner: params.owner,
+              repo: params.repo,
+              path: "README.md",
+              content: params.content,
+              message: params.message,
+              branch: params.branch,
+            });
+            return;
+          } catch {}
+        }
+        // Wait for GitHub to finish initializing default branch
+        await new Promise((r) => setTimeout(r, 1200));
+      }
+    }
+  }
+
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(`${GITHUB_API_URL}${path}`, {
       ...init,

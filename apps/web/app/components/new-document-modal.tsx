@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
@@ -7,6 +7,7 @@ import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import type { Folder, Note } from "./types";
+import { folderOptions as getFolderOptions } from "@/app/lib/workspace";
 
 const TEMPLATES: Record<string, string> = {
   Blank: "# Untitled\n\n",
@@ -16,20 +17,6 @@ const TEMPLATES: Record<string, string> = {
   "YouTube Script": "# YouTube Script\n\n## Hook\n\n## Main Content\n\n",
 };
 
-function folderOptions(folders: Folder[]): string[] {
-  const opts: string[] = [];
-  function walk(fs: Folder[], prefix = "") {
-    for (const f of fs) {
-      const path = prefix ? `${prefix}/${f.name}` : f.name;
-      opts.push(path);
-      if (f.folders) walk(f.folders, path);
-    }
-  }
-  walk(folders);
-  if (opts.length === 0) opts.push("Root");
-  return opts;
-}
-
 export function NewDocumentModal({
   open,
   onOpenChange,
@@ -37,6 +24,7 @@ export function NewDocumentModal({
   documents,
   onCreate,
   repoConnected,
+  initialFolder,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -44,11 +32,24 @@ export function NewDocumentModal({
   documents: Note[];
   onCreate: (note: Note) => void;
   repoConnected: boolean;
+  initialFolder?: string | null;
 }) {
-  const options = folderOptions(folders);
+  const options = getFolderOptions(folders);
   const [title, setTitle] = useState("");
   const [location, setLocation] = useState(options[0] ?? "Root");
   const [template, setTemplate] = useState("Blank");
+
+  useEffect(() => {
+    if (open) {
+      if (initialFolder) {
+        // verify it exists, otherwise fallback
+        const exists = options.includes(initialFolder);
+        setLocation(exists ? initialFolder : (options[0] ?? "Root"));
+      } else {
+        setLocation(options[0] ?? "Root");
+      }
+    }
+  }, [open, initialFolder, options.join("|")]);
 
   function handleCreate() {
     const name = title.trim() || "Untitled";

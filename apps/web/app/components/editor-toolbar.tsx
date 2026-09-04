@@ -42,7 +42,11 @@ export function EditorToolbar({ editor }: { editor: Editor }) {
       <ToolbarButton label="☑" active={editor.isActive("taskList")} onClick={() => editor.commands.toggleTaskList()} />
       <ToolbarButton label="—" onClick={() => editor.commands.setHorizontalRule()} />
       <ToolbarButton label="Code" active={editor.isActive("codeBlock")} onClick={() => editor.chain().focus().toggleCodeBlock().run()} />
-      <ToolbarButton label="Table" onClick={() => { editor.commands.focus(); editor.commands.insertTable({ rows: 3, cols: 3, withHeaderRow: true }); }} />
+      {editor.isActive("table") ? (
+        <ToolbarButton label="Delete table" onClick={() => editor.chain().focus().deleteTable().run()} />
+      ) : (
+        <ToolbarButton label="Table" onClick={() => { editor.commands.focus(); editor.commands.insertTable({ rows: 3, cols: 3, withHeaderRow: true }); }} />
+      )}
       <ToolbarButton label="Link" active={editor.isActive("link")} onClick={() => { const { from, to } = editor.state.selection; setLinkSelection({ from, to }); setLinkDialogOpen(true); }} />
       <ToolbarButton label="Unlink" disabled={!editor.isActive("link")} onClick={() => editor.chain().focus().unsetLink().run()} />
       <div className="mx-1 h-5 w-px bg-editor-border" />

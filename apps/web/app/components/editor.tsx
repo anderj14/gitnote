@@ -10,7 +10,11 @@ import Link from "@tiptap/extension-link";
 import Blockquote from "@tiptap/extension-blockquote";
 import { ListKit } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
+import CodeBlock from "@tiptap/extension-code-block";
 import { TableControls } from "./table-controls";
+import { CodeBlockControls } from "./code-block-controls";
+import { ShikiCodeBlock } from "./shiki-code-block";
+import { CodeBlockIndent } from "./code-block-indent";
 import { MarkdownPaste } from "./markdown-paste-extension";
 import type { SaveStatus } from "./types";
 
@@ -38,17 +42,40 @@ export function Editor({ title, content, saveStatus, canSave, theme = "light", o
 
   const editor = useEditor({
     extensions: [
-      StarterKit.configure({ link: false, blockquote: false, bulletList: false, orderedList: false, listItem: false, listKeymap: false }),
+      StarterKit.configure({ link: false, blockquote: false, bulletList: false, orderedList: false, listItem: false, listKeymap: false, codeBlock: false }),
       Markdown,
       Link.configure({ openOnClick: false, autolink: true, defaultProtocol: "https" }),
       Blockquote,
       ListKit.configure({ taskItem: { nested: true } }),
       TableKit.configure({ table: { resizable: true, cellMinWidth: 80, lastColumnResizable: true } }),
+      CodeBlock.configure({ HTMLAttributes: { class: "not-prose" } }),
+      ShikiCodeBlock,
+      CodeBlockIndent,
       MarkdownPaste,
     ],
     content,
     contentType: "markdown",
     immediatelyRender: false,
+    editorProps: {
+      handleKeyDown(view, event) {
+        // Allow Backspace/Delete to delete empty table or table when selection covers it
+        if ((event.key === "Backspace" || event.key === "Delete") && view.state.selection.empty) {
+          const { $from } = view.state.selection;
+          // If cursor is directly before/after a table and table is empty, allow default
+          // Also, if inside table and table has no content, deleteTable on Backspace
+          const editorInstance = (view as unknown as { editor?: { isActive: (n: string) => boolean; chain: () => { focus: () => { deleteTable: () => { run: () => boolean } } } } })?.editor;
+          if (editorInstance?.isActive("table")) {
+            // If table is the only node or user presses mod+Backspace, delete it
+            if (event.metaKey || event.ctrlKey) {
+              event.preventDefault();
+              editorInstance.chain().focus().deleteTable().run();
+              return true;
+            }
+          }
+        }
+        return false;
+      },
+    },
     onUpdate({ editor }) {
       onChange(editor.getMarkdown());
       onHeadingsChange?.(extractHeadings(editor));
@@ -102,7 +129,7 @@ function extractHeadings(editor: any): { id: string; text: string; level: number
   return (
     <div className={`flex h-full w-full flex-col bg-editor ${theme === "light" ? "editor-light" : ""}`}>
       <div className="shrink-0 border-b border-editor-border bg-editor px-6 py-3">
-        <div className="mx-auto flex w-full max-w-[880px] items-center justify-between gap-4">
+        <div className="mx-auto flex w-full max-w-[1120px] items-center justify-between gap-4">
           <span className="font-mono text-[11px] text-editor-muted">Markdown · {saveStatus === "saved" ? "Synced" : saveStatus}</span>
           <div className="flex items-center gap-2">
             <SaveStatusLabel status={saveStatus} />
@@ -119,7 +146,7 @@ function extractHeadings(editor: any): { id: string; text: string; level: number
       </div>
 
       <div className="scroll-thin flex-1 overflow-y-auto">
-        <div className="mx-auto flex min-h-full w-full max-w-[880px] flex-col px-8 py-12 md:px-12 lg:px-16">
+        <div className="mx-auto flex min-h-full w-full max-w-[1120px] flex-col px-6 py-10 md:px-10 lg:px-12">
           <input
             type="text"
             value={title}
@@ -138,6 +165,7 @@ function extractHeadings(editor: any): { id: string; text: string; level: number
               {slashQuery !== null && <SlashMenu query={slashQuery} editor={editor} onClose={() => setSlashQuery(null)} />}
               <EditorContent editor={editor} className="min-h-[50vh]" />
               <TableControls editor={editor} />
+              <CodeBlockControls editor={editor} />
             </div>
             {slashQuery !== null && <p className="mt-2 font-mono text-[11px] text-editor-muted">↑↓ navigate · ↵ select · Esc close</p>}
           </div>
