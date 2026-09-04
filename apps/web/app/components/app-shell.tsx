@@ -1322,21 +1322,28 @@ export function AppShell() {
 
     return (
         <div className="flex h-screen w-full overflow-hidden bg-background">
-            <aside className={cn("shrink-0 overflow-hidden border-r border-chrome-border transition-[width] duration-200", sidebarOpen ? "w-[264px]" : "w-0 border-r-0")}>
-                <div className="h-full w-[264px]">
-                    <Sidebar
-                        folders={folders}
-                        documents={rootDocuments}
-                        selectedDocumentId={selectedDocument?.id ?? null}
-                        workspaceLabel={workspaceLabel}
-                        status={sidebarStatus}
-                        repoName={selectedRepository?.name ?? null}
-                        repoBranch={selectedRepository?.defaultBranch ?? null}
-                        repoStatus={gitStatus}
-                        changes={changes}
-                        selectedChangeId={selectedChange?.id ?? null}
-                        changesCollapsed={changesCollapsed}
-                        repoConnected={!!selectedRepository}
+            {/* Backdrop for mobile - Word-like overlay */}
+            {sidebarOpen && (
+                <button
+                    aria-label="Close sidebar"
+                    onClick={() => setSidebarOpen(false)}
+                    className="fixed inset-0 z-20 bg-black/20 backdrop-blur-[1px] lg:hidden"
+                />
+            )}
+            <aside className={cn("fixed inset-y-0 left-0 z-30 flex h-screen w-[264px] flex-col border-r border-chrome-border bg-chrome shadow-panel transition-transform duration-200 will-change-transform", sidebarOpen ? "translate-x-0" : "-translate-x-full")}>
+                <Sidebar
+                    folders={folders}
+                    documents={rootDocuments}
+                    selectedDocumentId={selectedDocument?.id ?? null}
+                    workspaceLabel={workspaceLabel}
+                    status={sidebarStatus}
+                    repoName={selectedRepository?.name ?? null}
+                    repoBranch={selectedRepository?.defaultBranch ?? null}
+                    repoStatus={gitStatus}
+                    changes={changes}
+                    selectedChangeId={selectedChange?.id ?? null}
+                    changesCollapsed={changesCollapsed}
+                    repoConnected={!!selectedRepository}
                         action={
                             account ? (
                                 <button type="button" onClick={handleLogout} className="rounded-md px-2 py-1 text-xs text-chrome-muted hover:bg-chrome-hover hover:text-chrome-foreground">
@@ -1375,10 +1382,9 @@ export function AppShell() {
                         onToggleFileHistory={() => setFileHistoryCollapsed((v) => !v)}
                         onRetryFileHistory={() => selectedDocument && void fetchHistory(selectedDocument.path, true)}
                     />
-                </div>
             </aside>
 
-            <div className="flex min-w-0 flex-1 flex-col">
+            <div className={cn("flex min-w-0 flex-1 flex-col transition-[margin-left] duration-200", sidebarOpen ? "ml-[264px]" : "ml-0")}>
                 <TopBar breadcrumbs={breadcrumbs} status={gitStatus} onToggleSidebar={() => setSidebarOpen((v) => !v)} onTogglePanel={() => setPanelOpen((v) => !v)} onSearch={() => setSearchOpen(true)} accountLogin={account?.login ?? null} onToggleHistory={handleToggleHistory} historyActive={viewMode === "history" || viewMode === "commit" || viewMode === "historyDiff"} />
 
                 <div className={cn("flex min-h-0 flex-1", selectedDocument || viewMode === "diff" || viewMode === "historyDiff" ? "bg-editor" : viewMode === "history" || viewMode === "commit" ? "bg-chrome" : "bg-background")}>
