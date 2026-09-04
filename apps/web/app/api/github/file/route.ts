@@ -190,6 +190,52 @@ function isValidPath(value: string | null): value is string {
   return typeof value === "string" && value.length > 0 && !value.includes("..") && !value.startsWith("/") && value.length < 500;
 }
 
+export async function DELETE(request: NextRequest) {
+  const client = await getGitHubClientFromSession();
+  if (!client) {
+    return NextResponse.json({ error: "Not authenticated." }, { status: 401 });
+  }
+  const body = (await request.json().catch(() => null)) as {
+    owner?: unknown;
+    repo?: unknown;
+    path?: unknown;
+    branch?: unknown;
+    sha?: unknown;
+    message?: unknown;
+  } | null;
+  const owner = typeof body?.owner === "string" ? body.owner : null;
+  const repo = typeof body?.repo === "string" ? body.repo : null;
+  const path = typeof body?.path === "string" ? body.path : null;
+  const branch = typeof body?.branch === "string" ? body.branch : null;
+  const sha = typeof body?.sha === "string" ? body.sha : null;
+  const message = typeof body?.message === "string" ? body.message.trim() : "";
+  if (!isSafeSegment(owner) || !isSafeSegment(repo) || !isValidPath(path) || !branch || !sha) {
+    return NextResponse.json({ error: "Invalid file parameters." }, { status: 400 });
+  }
+  if (!message) {
+    return NextResponse.json({ error: "Commit message is required." }, { status: 400 });
+  }
+  try {
+    await client.deleteFile({ owner, repo, path, sha, branch, message });
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    if (error instanceof GitHubApiError) {
+      console.error("GitHub deleteFile failed:", error.status, error.message);
+      if (error.status === 409 || error.status === 422) {
+        return NextResponse.json({ error: "This file changed on GitHub. Reload the file before deleting it." }, { status: 409 });
+      }
+      if (error.status === 401 || error.status === 403) {
+        return NextResponse.json({ error: "You don't have permission to delete this file." }, { status: error.status });
+      }
+      if (error.status === 404) {
+        return NextResponse.json({ error: "File not found on GitHub." }, { status: 404 });
+      }
+      return NextResponse.json({ error: "Unable to delete file." }, { status: 502 });
+    }
+    return NextResponse.json({ error: "Unable to delete file." }, { status: 502 });
+  }
+}
+
 function isMarkdownPath(value: string | null): value is string {
   if (!value || value.includes("..")) {
     return false;

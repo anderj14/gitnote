@@ -2,17 +2,18 @@
 import { Check, GitBranch, Github, Dot } from "lucide-react";
 import { cn } from "@/app/lib/utils";
 
-export function GitStatus({ status = "Synced", className }: { status?: "Synced" | "Modified" | "Untracked"; className?: string }) {
+export function GitStatus({ status = "Synced", count, className }: { status?: "Synced" | "Modified" | "Untracked"; count?: number; className?: string }) {
   const synced = status === "Synced";
   return (
     <span className={cn("inline-flex items-center gap-1.5 rounded-md border border-chrome-border px-2 py-1 text-xs font-medium text-chrome-muted", className)}>
       {synced ? <Check className="size-3.5 text-success" /> : <Dot className="size-4 text-warning" />}
       {status}
+      {typeof count === "number" && count > 0 && <span className="font-mono text-[11px]">· {count}</span>}
     </span>
   );
 }
 
-export function RepoCard({ name, branch, status = "Synced" }: { name: string; branch: string; status?: "Synced" | "Modified" | "Untracked" }) {
+export function RepoCard({ name, branch, status = "Synced", count }: { name: string; branch: string; status?: "Synced" | "Modified" | "Untracked"; count?: number }) {
   return (
     <div className="rounded-lg border border-chrome-border bg-chrome-hover/60 p-3">
       <div className="flex items-center gap-2 label-caps text-chrome-muted">
@@ -23,7 +24,7 @@ export function RepoCard({ name, branch, status = "Synced" }: { name: string; br
         <GitBranch className="size-3" /> {branch}
       </p>
       <div className="mt-2.5">
-        <GitStatus status={status} className="bg-chrome" />
+        <GitStatus status={status} count={count} className="bg-chrome" />
       </div>
     </div>
   );

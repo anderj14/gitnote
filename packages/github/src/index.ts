@@ -41,6 +41,37 @@ export type GitHubFile = {
   sha: string;
 };
 
+export type GitCommit = {
+  sha: string;
+  message: string;
+  authorName: string;
+  authorEmail?: string;
+  authorAvatarUrl?: string;
+  date: string;
+  parentSha?: string;
+};
+
+export type GitCommitFile = {
+  path: string;
+  previousPath?: string;
+  status: "added" | "modified" | "removed" | "renamed";
+  additions: number;
+  deletions: number;
+  sha?: string;
+};
+
+export type GitCommitDetails = {
+  sha: string;
+  message: string;
+  authorName: string;
+  authorEmail?: string;
+  authorAvatarUrl?: string;
+  date: string;
+  parentSha?: string;
+  files: GitCommitFile[];
+  stats: { additions: number; deletions: number; total: number };
+};
+
 export type GitHubUpdateFileParams = {
   owner: string;
   repo: string;
@@ -108,6 +139,39 @@ type GitHubContentsResponse = {
   path: string;
   content: string;
   encoding: string;
+};
+
+type GitHubCommitsResponse = Array<{
+  sha: string;
+  commit: {
+    message: string;
+    author: { name: string; email: string; date: string } | null;
+    committer: { name: string; email: string; date: string } | null;
+  };
+  author: { login: string; avatar_url: string } | null;
+  committer: { login: string; avatar_url: string } | null;
+  parents: Array<{ sha: string }>;
+}>;
+
+type GitHubCommitResponse = {
+  sha: string;
+  commit: {
+    message: string;
+    author: { name: string; email: string; date: string } | null;
+    committer: { name: string; email: string; date: string } | null;
+  };
+  author: { login: string; avatar_url: string } | null;
+  committer: { login: string; avatar_url: string } | null;
+  parents: Array<{ sha: string }>;
+  files?: Array<{
+    filename: string;
+    previous_filename?: string;
+    status: string;
+    additions: number;
+    deletions: number;
+    sha?: string;
+  }>;
+  stats?: { additions: number; deletions: number; total: number };
 };
 
 type GitHubUpdateContentsResponse = {
@@ -271,6 +335,79 @@ export class GitHubClient {
     };
   }
 
+  async getCommitHistory(params: {
+    owner: string;
+    repo: string;
+    branch: string;
+    path?: string;
+    perPage?: number;
+  }): Promise<GitCommit[]> {
+    const searchParams = new URLSearchParams({ sha: params.branch, per_page: String(params.perPage ?? 30) });
+    if (params.path) searchParams.set("path", params.path);
+    const data = await this.request<GitHubCommitsResponse>(
+      `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/commits?${searchParams.toString()}`,
+    );
+    return data.map((item) => ({
+      sha: item.sha,
+      message: item.commit.message,
+      authorName: item.commit.author?.name ?? item.commit.committer?.name ?? item.author?.login ?? "Unknown author",
+      authorEmail: item.commit.author?.email ?? item.commit.committer?.email,
+      authorAvatarUrl: item.author?.avatar_url ?? item.committer?.avatar_url,
+      date: item.commit.author?.date ?? item.commit.committer?.date ?? new Date().toISOString(),
+      parentSha: item.parents[0]?.sha,
+    }));
+  }
+
+  async getCommitDetails(params: { owner: string; repo: string; sha: string }): Promise<GitCommitDetails> {
+    const data = await this.request<GitHubCommitResponse>(
+      `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/commits/${encodeURIComponent(params.sha)}`,
+    );
+    const files: GitCommitFile[] = (data.files ?? []).map((f) => ({
+      path: f.filename,
+      previousPath: f.previous_filename,
+      status: mapCommitFileStatus(f.status),
+      additions: f.additions,
+      deletions: f.deletions,
+      sha: f.sha,
+    }));
+    return {
+      sha: data.sha,
+      message: data.commit.message,
+      authorName: data.commit.author?.name ?? data.commit.committer?.name ?? data.author?.login ?? "Unknown author",
+      authorEmail: data.commit.author?.email ?? data.commit.committer?.email,
+      authorAvatarUrl: data.author?.avatar_url ?? data.committer?.avatar_url,
+      date: data.commit.author?.date ?? data.commit.committer?.date ?? new Date().toISOString(),
+      parentSha: data.parents[0]?.sha,
+      files,
+      stats: data.stats ?? { additions: files.reduce((a, f) => a + f.additions, 0), deletions: files.reduce((a, f) => a + f.deletions, 0), total: files.length },
+    };
+  }
+
+  async getTreeAtCommit(params: { owner: string; repo: string; sha: string }): Promise<GitHubRepositoryTree> {
+    // Get commit to find tree sha, then fetch tree recursively
+    const commit = await this.request<{ tree: { sha: string } }>(
+      `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/commits/${encodeURIComponent(params.sha)}`,
+    );
+    const tree = await this.request<GitHubTreeResponse>(
+      `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/trees/${encodeURIComponent(commit.tree.sha)}?recursive=1`,
+    );
+    if (tree.truncated) throw new GitHubApiError("Repository tree is too large.", 422);
+    const folders = new Set<string>();
+    const files: GitHubMarkdownFile[] = [];
+    for (const item of tree.tree) {
+      if (!isValidTreeItem(item)) continue;
+      if (item.type === "tree") folders.add(item.path);
+      else if (item.type === "blob" && isMarkdownPath(item.path)) {
+        addParentFolders(item.path, folders);
+        files.push({ name: getBaseName(item.path), path: item.path, sha: item.sha, size: item.size });
+      }
+    }
+    return {
+      folders: [...folders].sort((a, b) => a.localeCompare(b)),
+      files: files.sort((a, b) => a.path.localeCompare(b.path)),
+    };
+  }
+
   async getFile(params: {
     owner: string;
     repo: string;
@@ -343,6 +480,135 @@ export class GitHubClient {
       },
     );
     return { sha: data.content.sha, path: data.content.path };
+  }
+
+  async deleteFile(params: {
+    owner: string;
+    repo: string;
+    path: string;
+    sha: string;
+    message: string;
+    branch: string;
+  }): Promise<void> {
+    await this.request<unknown>(
+      `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${encodePath(params.path)}`,
+      {
+        method: "DELETE",
+        body: JSON.stringify({
+          message: params.message,
+          sha: params.sha,
+          branch: params.branch,
+        }),
+      },
+    );
+  }
+
+  // Multi-file atomic commit via Git Data API (blobs -> tree -> commit -> ref)
+  async commitChanges(params: {
+    owner: string;
+    repo: string;
+    branch: string;
+    message: string;
+    changes: Array<{
+      type: "added" | "modified" | "deleted" | "renamed";
+      path: string;
+      oldPath?: string;
+      content?: string;
+      sha?: string;
+    }>;
+  }): Promise<{ commitSha: string }> {
+    if (params.changes.length === 0) throw new GitHubApiError("No changes to commit.", 400);
+
+    // 1. Get current branch ref to obtain base commit sha
+    const ref = await this.request<{ object: { sha: string } }>(
+      `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/ref/heads/${encodeURIComponent(params.branch)}`,
+    );
+    const baseCommitSha = ref.object.sha;
+
+    // 2. Get base commit to obtain base tree sha
+    const baseCommit = await this.request<{ tree: { sha: string } }>(
+      `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/commits/${baseCommitSha}`,
+    );
+    const baseTreeSha = baseCommit.tree.sha;
+
+    // 3. Create blobs for added/modified (and renamed new path)
+    const blobMap = new Map<string, string>(); // path -> blob sha
+    for (const change of params.changes) {
+      if (change.type === "deleted") continue;
+      // For renamed, the new content is at change.path (content may be undefined if only path changed, but if renamed without modification content is still needed - fetch original? Assume content provided)
+      const content = change.content ?? "";
+      // Skip blob creation for renamed without content change? Need blob even if same content to ensure file exists at new path (original content)
+      const blobSha = await this.createBlob({ owner: params.owner, repo: params.repo, content });
+      blobMap.set(change.path, blobSha);
+    }
+
+    // 4. Build tree entries
+    const treeEntries: Array<{ path: string; mode: string; type: string; sha: string | null }> = [];
+    for (const change of params.changes) {
+      if (change.type === "deleted") {
+        treeEntries.push({ path: change.path, mode: "100644", type: "blob", sha: null });
+      } else if (change.type === "renamed" && change.oldPath) {
+        // Delete old path
+        treeEntries.push({ path: change.oldPath, mode: "100644", type: "blob", sha: null });
+        // Create new path
+        const blobSha = blobMap.get(change.path);
+        if (!blobSha) throw new GitHubApiError(`Missing blob for renamed file ${change.path}`, 400);
+        treeEntries.push({ path: change.path, mode: "100644", type: "blob", sha: blobSha });
+      } else {
+        // added / modified
+        const blobSha = blobMap.get(change.path);
+        if (!blobSha) throw new GitHubApiError(`Missing blob for ${change.path}`, 400);
+        treeEntries.push({ path: change.path, mode: "100644", type: "blob", sha: blobSha });
+      }
+    }
+
+    // 5. Create new tree
+    const newTree = await this.request<{ sha: string }>(
+      `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/trees`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          base_tree: baseTreeSha,
+          tree: treeEntries,
+        }),
+      },
+    );
+
+    // 6. Create commit
+    const newCommit = await this.request<{ sha: string }>(
+      `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/commits`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          message: params.message,
+          tree: newTree.sha,
+          parents: [baseCommitSha],
+        }),
+      },
+    );
+
+    // 7. Update ref
+    await this.request<unknown>(
+      `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/refs/heads/${encodeURIComponent(params.branch)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ sha: newCommit.sha, force: false }),
+      },
+    );
+
+    return { commitSha: newCommit.sha };
+  }
+
+  private async createBlob(params: { owner: string; repo: string; content: string }): Promise<string> {
+    const encoded = Buffer.from(params.content, "utf8").toString("base64");
+    const data = await this.request<{ sha: string }>(
+      `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/blobs`,
+      {
+        method: "POST",
+        body: JSON.stringify({ content: encoded, encoding: "base64" }),
+      },
+    );
+    return data.sha;
   }
 
   async ensureReadme(params: {
@@ -480,4 +746,13 @@ function getBaseName(path: string): string {
 
 function encodePath(path: string): string {
   return path.split("/").map(encodeURIComponent).join("/");
+}
+
+function mapCommitFileStatus(status: string): GitCommitFile["status"] {
+  switch (status) {
+    case "added": return "added";
+    case "removed": return "removed";
+    case "renamed": return "renamed";
+    default: return "modified";
+  }
 }

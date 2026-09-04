@@ -24,10 +24,9 @@ export function getFolderPathForDocument(doc: Note): string | null {
 export function updateDocumentPath(doc: Note, newPath: string): Note {
   const newName = getBaseName(newPath);
   const updated: Note = { ...doc, path: newPath, name: newName };
-  // Keep GitHub source.path in sync locally (no commit), but preserve sha/owner/etc
-  if (doc.source) {
-    updated.source = { ...doc.source, path: newPath };
-  }
+  // Preserve source.path as original GitHub path — do NOT overwrite.
+  // Current location is doc.path; original location remains in source.path.
+  // This enables correct rename detection (source.path vs path).
   return updated;
 }
 
@@ -407,7 +406,7 @@ export function deleteDocumentFromTree(folders: Folder[], rootDocs: Note[], docI
   return removeDocument(folders, rootDocs, docId);
 }
 
-export function hasPendingChanges(folders: Folder[], rootDocs: Note[]): boolean {
+export function hasPendingChanges(_folders: Folder[], _rootDocs: Note[]): boolean {
   // Heuristic: we expose hasChanges flag externally; this helper not used for auto-detection
   return false;
 }
