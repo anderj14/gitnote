@@ -355,10 +355,11 @@ export function AppShell() {
         // We intentionally don't flip saveStatus for name alone (commit is for markdown content).
     }
 
-    function handleCreateDocument(note: Note) {
+    async function handleCreateDocument(note: Note) {
         const path = note.path;
         const folderPath = path.includes("/") ? path.split("/").slice(0, -1).join("/") : null;
 
+        // Optimistic local update
         if (!folderPath) {
             setRootDocuments((prev) => [...prev, note].sort((a, b) => a.name.localeCompare(b.name)));
         } else {
@@ -372,19 +373,106 @@ export function AppShell() {
         setSelectedDocument(note);
         setLastSavedContent(note.content);
         setSaveStatus("saved");
+
+        if (selectedRepository) {
+            // Commit de inmediato a GitHub
+            try {
+                const res = await fetch("/api/github/file", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        owner: selectedRepository.owner,
+                        repo: selectedRepository.name,
+                        path: note.path,
+                        branch: selectedRepository.defaultBranch,
+                        content: note.content,
+                        message: `Create ${note.path}`,
+                    }),
+                });
+                const data = (await res.json().catch(() => ({}))) as { file?: { sha: string; path: string }; error?: string };
+                if (!res.ok || !data.file) throw new Error(data.error ?? "Unable to create file on GitHub");
+                const sha = data.file.sha;
+                const source = {
+                    type: "github" as const,
+                    owner: selectedRepository.owner,
+                    repo: selectedRepository.name,
+                    branch: selectedRepository.defaultBranch,
+                    path: note.path,
+                    sha,
+                };
+                const withSource: Note = { ...note, source, id: `github-file:${selectedRepository.fullName}:${note.path}` };
+                // Replace local note with github-sourced one (preserve tree, just attach source/sha)
+                setFolders((prev) =>
+                    prev.map((fld) => ({
+                        ...fld,
+                        documents: fld.documents.map((d) => (d.id === note.id ? withSource : d)),
+                        folders: fld.folders ? replaceInTree(fld.folders, note.id, withSource) : undefined,
+                    })),
+                );
+                setRootDocuments((prev) => prev.map((d) => (d.id === note.id ? withSource : d)));
+                setSelectedDocument(withSource);
+                toast.success("Document created on GitHub", { description: note.path });
+                setHasWorkspaceChanges(false);
+                return;
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : "Unable to create file on GitHub";
+                toast.error(msg);
+                setHasWorkspaceChanges(true);
+                return;
+            }
+        }
+
         setHasWorkspaceChanges(true);
         toast.success("Document created", { description: note.path });
     }
 
-    function handleCreateFolder(name: string, parentPath: string | null) {
+    function replaceInTree(folders: Folder[], oldId: string, newNote: Note): Folder[] {
+        return folders.map((f) => ({
+            ...f,
+            documents: f.documents.map((d) => (d.id === oldId ? newNote : d)),
+            folders: f.folders ? replaceInTree(f.folders, oldId, newNote) : undefined,
+        }));
+    }
+
+    async function handleCreateFolder(name: string, parentPath: string | null) {
         const result = createFolder(folders, parentPath, name);
         if (result.error) {
             toast.error(result.error);
             return;
         }
         setFolders(result.folders);
-        setHasWorkspaceChanges(true);
         setNewFolderOpen(false);
+
+        if (selectedRepository) {
+            const folderPath = parentPath ? `${parentPath}/${name}` : name;
+            const gitkeepPath = `${folderPath}/.gitkeep`;
+            try {
+                const res = await fetch("/api/github/file", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        owner: selectedRepository.owner,
+                        repo: selectedRepository.name,
+                        path: gitkeepPath,
+                        branch: selectedRepository.defaultBranch,
+                        content: "",
+                        message: `Create folder ${folderPath}`,
+                    }),
+                });
+                const data = (await res.json().catch(() => ({}))) as { file?: { sha: string }; error?: string };
+                if (!res.ok || !data.file) throw new Error(data.error ?? "Unable to create folder on GitHub");
+                toast.success("Folder created on GitHub", { description: folderPath });
+                setHasWorkspaceChanges(false);
+                return;
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : "Unable to create folder on GitHub";
+                toast.error(msg);
+                setHasWorkspaceChanges(true);
+                return;
+            }
+        }
+
+        setHasWorkspaceChanges(true);
         toast.success("Folder created", { description: parentPath ? `${parentPath}/${name}` : name });
     }
 

@@ -34,6 +34,52 @@ export async function GET(request: NextRequest) {
   }
 }
 
+export async function POST(request: NextRequest) {
+  const client = await getGitHubClientFromSession();
+  if (!client) {
+    return NextResponse.json({ error: "Not authenticated." }, { status: 401 });
+  }
+  const body = (await request.json().catch(() => null)) as {
+    owner?: unknown;
+    repo?: unknown;
+    path?: unknown;
+    branch?: unknown;
+    content?: unknown;
+    message?: unknown;
+  } | null;
+  const owner = typeof body?.owner === "string" ? body.owner : null;
+  const repo = typeof body?.repo === "string" ? body.repo : null;
+  const path = typeof body?.path === "string" ? body.path : null;
+  const branch = typeof body?.branch === "string" ? body.branch : null;
+  const content = typeof body?.content === "string" ? body.content : null;
+  const message = typeof body?.message === "string" ? body.message.trim() : "";
+  if (!isSafeSegment(owner) || !isSafeSegment(repo) || !isValidPath(path) || !branch || content === null) {
+    return NextResponse.json({ error: "Invalid file parameters." }, { status: 400 });
+  }
+  if (!message) {
+    return NextResponse.json({ error: "Commit message is required." }, { status: 400 });
+  }
+  if (content.length > 1_000_000) {
+    return NextResponse.json({ error: "File is too large." }, { status: 400 });
+  }
+  try {
+    const result = await client.createFile({ owner, repo, path, branch, content, message });
+    return NextResponse.json({ file: { sha: result.sha, path: result.path } }, { status: 201 });
+  } catch (error) {
+    if (error instanceof GitHubApiError) {
+      console.error("GitHub createFile failed:", error.status, error.message);
+      if (error.status === 422) {
+        return NextResponse.json({ error: "File already exists." }, { status: 409 });
+      }
+      if (error.status === 401 || error.status === 403) {
+        return NextResponse.json({ error: "You don't have permission to create this file." }, { status: error.status });
+      }
+      return NextResponse.json({ error: "Unable to create file." }, { status: 502 });
+    }
+    return NextResponse.json({ error: "Unable to create file." }, { status: 502 });
+  }
+}
+
 export async function PUT(request: NextRequest) {
   const client = await getGitHubClientFromSession();
 
@@ -138,6 +184,10 @@ export async function PUT(request: NextRequest) {
 
 function isSafeSegment(value: string | null): value is string {
   return typeof value === "string" && /^[A-Za-z0-9_.-]+$/.test(value);
+}
+
+function isValidPath(value: string | null): value is string {
+  return typeof value === "string" && value.length > 0 && !value.includes("..") && !value.startsWith("/") && value.length < 500;
 }
 
 function isMarkdownPath(value: string | null): value is string {
