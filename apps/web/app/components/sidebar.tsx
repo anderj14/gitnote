@@ -32,6 +32,11 @@ type SidebarProps = {
   historyLoading?: boolean;
   historyError?: string | null;
   historyCollapsed?: boolean;
+  fileHistoryCommits?: HistoryCommit[];
+  fileHistoryLoading?: boolean;
+  fileHistoryError?: string | null;
+  fileHistoryCollapsed?: boolean;
+  selectedDocumentPath?: string | null;
   onSelectDocument: (note: Note) => void;
   onNewDocument?: () => void;
   onNewFolder?: (parentPath: string | null) => void;
@@ -46,6 +51,8 @@ type SidebarProps = {
   onSelectHistoryCommit?: (sha: string) => void;
   onToggleHistory?: () => void;
   onRetryHistory?: () => void;
+  onToggleFileHistory?: () => void;
+  onRetryFileHistory?: () => void;
 };
 
 export function Sidebar({
@@ -67,6 +74,11 @@ export function Sidebar({
   historyLoading = false,
   historyError = null,
   historyCollapsed = false,
+  fileHistoryCommits = [],
+  fileHistoryLoading = false,
+  fileHistoryError = null,
+  fileHistoryCollapsed = false,
+  selectedDocumentPath = null,
   onSelectDocument,
   onNewDocument,
   onNewFolder,
@@ -81,6 +93,8 @@ export function Sidebar({
   onSelectHistoryCommit,
   onToggleHistory,
   onRetryHistory,
+  onToggleFileHistory,
+  onRetryFileHistory,
 }: SidebarProps) {
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {};
@@ -199,6 +213,27 @@ export function Sidebar({
               {!historyCollapsed && (
                 <div className="border-t border-chrome-border max-h-[320px] overflow-y-auto scroll-thin">
                   <GitHistory commits={historyCommits} selectedSha={selectedHistorySha} onSelect={(sha) => onSelectHistoryCommit?.(sha)} loading={historyLoading} error={historyError} onRetry={onRetryHistory} />
+                </div>
+              )}
+            </div>
+          )}
+
+          {repoConnected && selectedDocumentPath && (
+            <div className="rounded-lg border border-chrome-border bg-chrome-hover/30">
+              <button type="button" onClick={() => onToggleFileHistory?.()} className="flex w-full items-center justify-between px-3 py-2 text-left hover:bg-chrome-hover">
+                <span className="flex items-center gap-2 min-w-0">
+                  <span className="label-caps text-chrome-muted truncate">File History</span>
+                  <span className="truncate font-mono text-[11px] text-chrome-muted">{selectedDocumentPath.split("/").pop()}</span>
+                  <span className="rounded-full bg-chrome-active px-1.5 py-0.5 font-mono text-[11px] text-chrome-muted">{fileHistoryCommits.length}</span>
+                </span>
+                <span className="text-[11px] text-chrome-muted shrink-0">{fileHistoryCollapsed ? "Show" : "Hide"}</span>
+              </button>
+              {!fileHistoryCollapsed && (
+                <div className="border-t border-chrome-border max-h-[320px] overflow-y-auto scroll-thin">
+                  <GitHistory commits={fileHistoryCommits} selectedSha={selectedHistorySha} onSelect={(sha) => onSelectHistoryCommit?.(sha)} loading={fileHistoryLoading} error={fileHistoryError} onRetry={onRetryFileHistory} />
+                  {!fileHistoryLoading && !fileHistoryError && fileHistoryCommits.length === 0 && (
+                    <p className="px-3 py-2 text-xs text-chrome-muted">No commits yet for this file. It may be new and not yet committed.</p>
+                  )}
                 </div>
               )}
             </div>

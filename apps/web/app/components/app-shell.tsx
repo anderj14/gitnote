@@ -203,6 +203,7 @@ export function AppShell() {
     const [viewMode, setViewMode] = useState<"editor" | "diff" | "history" | "commit" | "historyDiff">("editor");
     const [changesCollapsed, setChangesCollapsed] = useState(false);
     const [historyCollapsed, setHistoryCollapsed] = useState(false);
+    const [fileHistoryCollapsed, setFileHistoryCollapsed] = useState(false);
     const [originalLoadingIds, setOriginalLoadingIds] = useState<Set<string>>(new Set());
     const [originalErrors, setOriginalErrors] = useState<Map<string, string>>(new Map());
     const originalFetchingRef = useRef<Set<string>>(new Set());
@@ -1077,6 +1078,18 @@ export function AppShell() {
         }
     }, [selectedRepository?.fullName]);
 
+    // Auto-fetch file history for sidebar when document selected (so sidebar shows file-specific commits, not 0 repo)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useEffect(() => {
+        if (selectedDocument && selectedRepository && selectedDocument.path) {
+            // Only fetch file history if document has been committed before (has source) or to show empty for new files
+            void fetchHistory(selectedDocument.path);
+        } else if (!selectedDocument) {
+            // optionally keep previous file history, or clear
+            // keep as is; do not clear to avoid flicker
+        }
+    }, [selectedDocument?.path, selectedRepository?.fullName]);
+
     async function handleRestoreCommit() {
         if (!commitDetails || !selectedRepository) return;
         // confirm already done via restoreConfirm
@@ -1358,9 +1371,16 @@ export function AppShell() {
                         historyLoading={historyLoading}
                         historyError={historyError}
                         historyCollapsed={historyCollapsed}
+                        fileHistoryCommits={fileHistoryCommits}
+                        fileHistoryLoading={fileHistoryLoading}
+                        fileHistoryError={fileHistoryError}
+                        fileHistoryCollapsed={fileHistoryCollapsed}
+                        selectedDocumentPath={selectedDocument?.path ?? null}
                         onSelectHistoryCommit={(sha) => void handleSelectHistoryCommit(sha)}
                         onToggleHistory={() => setHistoryCollapsed((v) => !v)}
-                        onRetryHistory={() => void fetchHistory(true)}
+                        onRetryHistory={() => void fetchHistory(null, true)}
+                        onToggleFileHistory={() => setFileHistoryCollapsed((v) => !v)}
+                        onRetryFileHistory={() => selectedDocument && void fetchHistory(selectedDocument.path, true)}
                     />
                 </div>
             </aside>
