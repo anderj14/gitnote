@@ -9,6 +9,9 @@
   "keywords": [],
   "author": "Andder Frias",
   "license": "ISC",
+  "dependencies": {
+    "next": "16.3.3"
+  },
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
