@@ -3,6 +3,7 @@
 import { Clock3, GitCommit as GitCommitIcon, Copy, Check } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { Spinner } from "./ui/spinner";
 
 export type HistoryCommit = {
   sha: string;
@@ -53,7 +54,14 @@ export function GitHistory({ commits, selectedSha, onSelect, loading, error, onR
   }
 
   if (loading) {
-    return <div className="px-3 py-4 text-center text-sm text-chrome-muted">Loading history...</div>;
+    return (
+      <div className="flex flex-col items-center justify-center gap-2 px-3 py-8 text-center">
+        <span className="grid size-8 place-items-center rounded-full border border-chrome-border bg-card">
+          <Spinner size={16} />
+        </span>
+        <p className="text-sm text-chrome-muted">Loading history…</p>
+      </div>
+    );
   }
   if (error) {
     return (
@@ -78,11 +86,18 @@ export function GitHistory({ commits, selectedSha, onSelect, loading, error, onR
         const isSelected = selectedSha === c.sha;
         const firstLine = c.message.split("\n")[0];
         return (
-          <button
+          <div
             key={c.sha}
-            type="button"
+            role="button"
+            tabIndex={0}
             onClick={() => onSelect(c.sha)}
-            className={`flex w-full flex-col gap-1 rounded-md border px-3 py-2.5 text-left transition-colors ${isSelected ? "border-primary bg-chrome-active" : "border-transparent bg-transparent hover:bg-chrome-hover hover:border-chrome-border"}`}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onSelect(c.sha);
+              }
+            }}
+            className={`flex w-full cursor-pointer flex-col gap-1 rounded-md border px-3 py-2.5 text-left transition-colors ${isSelected ? "border-primary bg-chrome-active" : "border-transparent bg-transparent hover:bg-chrome-hover hover:border-chrome-border"}`}
           >
             <span className="line-clamp-2 text-[13px] font-medium leading-5 text-chrome-foreground">{firstLine}</span>
             <span className="flex items-center gap-1.5 font-mono text-[11px] text-chrome-muted">
@@ -94,26 +109,19 @@ export function GitHistory({ commits, selectedSha, onSelect, loading, error, onR
             <span className="flex items-center gap-1.5">
               <GitCommitIcon className="size-3 text-chrome-muted" />
               <span className="font-mono text-[11px] text-chrome-muted">{shortSha(c.sha)}</span>
-              <span
-                role="button"
-                tabIndex={0}
+              <button
+                type="button"
                 onClick={(e) => {
                   e.stopPropagation();
                   copySha(c.sha);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.stopPropagation();
-                    copySha(c.sha);
-                  }
                 }}
                 className="ml-auto grid size-5 place-items-center rounded hover:bg-chrome-active text-chrome-muted"
                 aria-label="Copy SHA"
               >
                 {copied === c.sha ? <Check className="size-3 text-success" /> : <Copy className="size-3" />}
-              </span>
+              </button>
             </span>
-          </button>
+          </div>
         );
       })}
     </div>

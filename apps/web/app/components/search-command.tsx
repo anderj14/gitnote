@@ -1,19 +1,9 @@
 "use client";
+import { useMemo } from "react";
 import { FileCode2, FilePlus2, Github, PanelLeft, Search, Settings } from "lucide-react";
 import { CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut } from "./ui/command";
+import { flattenNotes } from "@/app/lib/workspace";
 import type { Folder, Note } from "./types";
-
-function flattenNotes(folders: Folder[], docs: Note[]): Note[] {
-  const out: Note[] = [...docs];
-  function walk(folders: Folder[]) {
-    for (const f of folders) {
-      out.push(...f.documents);
-      if (f.folders) walk(f.folders);
-    }
-  }
-  walk(folders);
-  return out;
-}
 
 export function SearchCommand({
   open,
@@ -32,7 +22,7 @@ export function SearchCommand({
   onNewDocument: () => void;
   onToggleSidebar: () => void;
 }) {
-  const allDocs = flattenNotes(folders, documents);
+  const allDocs = useMemo(() => flattenNotes(folders, documents), [folders, documents]);
   const run = (fn: () => void) => { onOpenChange(false); fn(); };
 
   return (

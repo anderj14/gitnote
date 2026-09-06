@@ -3,6 +3,7 @@
 import { ArrowRightLeft, FilePlus2, FilePenLine, Trash2, Copy, Check, Clock3, GitCommit as GitCommitIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { Spinner } from "./ui/spinner";
 
 export type CommitFile = {
   path: string;
@@ -63,7 +64,14 @@ export function CommitDetails({ commit, selectedPath, onSelectFile, onRestoreCom
   }
 
   if (loading) {
-    return <div className="flex flex-1 items-center justify-center p-8 text-sm text-chrome-muted">Loading commit details...</div>;
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+        <span className="grid size-10 place-items-center rounded-full border border-chrome-border bg-card shadow-panel">
+          <Spinner size={20} />
+        </span>
+        <p className="text-sm text-chrome-muted">Loading commit details…</p>
+      </div>
+    );
   }
   if (error) {
     return (

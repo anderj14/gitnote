@@ -53,6 +53,7 @@ type SidebarProps = {
   onRetryHistory?: () => void;
   onToggleFileHistory?: () => void;
   onRetryFileHistory?: () => void;
+  onOpenSettings?: () => void;
 };
 
 export function Sidebar({
@@ -95,6 +96,7 @@ export function Sidebar({
   onRetryHistory,
   onToggleFileHistory,
   onRetryFileHistory,
+  onOpenSettings,
 }: SidebarProps) {
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {};
@@ -252,9 +254,9 @@ export function Sidebar({
           </div>
         )}
         <div className="flex items-center gap-1 text-chrome-muted">
-          <a href="#" className="flex flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-[13px] transition-colors hover:bg-chrome-hover hover:text-chrome-foreground">
+          <button type="button" onClick={() => onOpenSettings?.()} className="flex flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-[13px] transition-colors hover:bg-chrome-hover hover:text-chrome-foreground">
             <Settings className="size-3.5" /> Settings
-          </a>
+          </button>
           <a href="/api/github/login" aria-label="GitHub integration" className="rounded-md p-1.5 transition-colors hover:bg-chrome-hover hover:text-chrome-foreground">
             <Github className="size-3.5" />
           </a>
@@ -309,14 +311,14 @@ function FolderRow({
         ]}
       >
         <div className="group flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[13px] font-medium text-chrome-foreground transition-colors hover:bg-chrome-hover">
-          <button type="button" onClick={onToggle} className="flex flex-1 items-center gap-1.5 truncate text-left">
+          <button type="button" onClick={onToggle} aria-expanded={open} aria-label={`${open ? "Collapse" : "Expand"} folder ${folder.name}`} className="flex flex-1 items-center gap-1.5 truncate text-left">
             {open ? <FolderOpen className="size-3.5 shrink-0 text-primary/70" /> : <Folder className="size-3.5 shrink-0 text-chrome-muted" />}
             <span className="truncate">{folder.name}</span>
             <span className="ml-auto text-[11px] text-chrome-muted">{folder.documents.length + (folder.folders?.length ?? 0)}</span>
           </button>
-          <span className="hidden items-center gap-0.5 group-hover:flex">
-            <button type="button" onClick={(e) => { e.stopPropagation(); onNewDocumentAt?.(folderPath); }} className="grid size-6 place-items-center rounded hover:bg-chrome-active" title="New document"><FilePlus2 className="size-3.5" /></button>
-            <button type="button" onClick={(e) => { e.stopPropagation(); onNewFolder?.(folderPath); }} className="grid size-6 place-items-center rounded hover:bg-chrome-active" title="New folder"><FolderPlus className="size-3.5" /></button>
+          <span className="hidden items-center gap-0.5 group-hover:flex group-focus-within:flex">
+            <button type="button" aria-label={`New document in ${folder.name}`} onClick={(e) => { e.stopPropagation(); onNewDocumentAt?.(folderPath); }} className="grid size-6 place-items-center rounded hover:bg-chrome-active" title="New document"><FilePlus2 className="size-3.5" /></button>
+            <button type="button" aria-label={`New folder in ${folder.name}`} onClick={(e) => { e.stopPropagation(); onNewFolder?.(folderPath); }} className="grid size-6 place-items-center rounded hover:bg-chrome-active" title="New folder"><FolderPlus className="size-3.5" /></button>
           </span>
         </div>
       </ContextMenuTrigger>

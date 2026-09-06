@@ -31,10 +31,10 @@ type EditorProps = {
 };
 
 function SaveStatusLabel({ status }: { status: SaveStatus }) {
-  if (status === "saving") return <span className="rounded-md border border-chrome-border px-2 py-1 text-xs font-medium text-chrome-muted">Saving…</span>;
-  if (status === "unsaved") return <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700">Unsaved changes</span>;
-  if (status === "error") return <span className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-600">Failed to save</span>;
-  return <span className="inline-flex items-center gap-1 rounded-md border border-chrome-border bg-chrome px-2 py-1 text-xs font-medium text-success">✓ Saved</span>;
+  if (status === "saving") return <span role="status" aria-live="polite" className="rounded-md border border-chrome-border px-2 py-1 text-xs font-medium text-chrome-muted">Saving…</span>;
+  if (status === "unsaved") return <span role="status" aria-live="polite" className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700">Unsaved changes</span>;
+  if (status === "error") return <span role="alert" aria-live="assertive" className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-600">Failed to save</span>;
+  return <span role="status" aria-live="polite" className="inline-flex items-center gap-1 rounded-md border border-chrome-border bg-chrome px-2 py-1 text-xs font-medium text-success">✓ Saved</span>;
 }
 
 export function Editor({ title, content, saveStatus, canSave, theme = "light", onTitleChange, onChange, onSave, onHeadingsChange }: EditorProps) {
@@ -111,7 +111,18 @@ export function Editor({ title, content, saveStatus, canSave, theme = "light", o
     onHeadingsChange(extractHeadings(editor));
   }, [editor, onHeadingsChange, content]);
 
-  if (!editor) return null;
+  if (!editor) {
+    return (
+      <div className={`flex h-full w-full flex-col ${theme === "light" ? "editor-light bg-editor" : "bg-editor"}`}>
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-12">
+          <span className="grid size-10 place-items-center rounded-full border border-editor-border bg-editor-raised shadow-panel">
+            <span className="size-5 animate-spin rounded-full border-2 border-editor-border border-t-primary" />
+          </span>
+          <p className="font-mono text-sm text-editor-muted">Loading editor…</p>
+        </div>
+      </div>
+    );
+  }
 
 function extractHeadings(editor: any): { id: string; text: string; level: number }[] {
   const headings: { id: string; text: string; level: number }[] = [];
@@ -148,6 +159,7 @@ function extractHeadings(editor: any): { id: string; text: string; level: number
       <div className="scroll-thin flex-1 overflow-y-auto">
         <div className="mx-auto flex min-h-full w-full max-w-[1120px] flex-col px-6 py-10 md:px-10 lg:px-12">
           <input
+            aria-label="Document title"
             type="text"
             value={title}
             onChange={(e) => onTitleChange(e.target.value)}

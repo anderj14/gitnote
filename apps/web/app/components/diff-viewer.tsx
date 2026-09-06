@@ -3,6 +3,7 @@
 import { diffLines, type DiffLine } from "@/app/lib/diff";
 import { ArrowRightLeft, FilePlus2, Trash2, FilePenLine } from "lucide-react";
 import { useMemo } from "react";
+import { Spinner } from "./ui/spinner";
 
 type DiffViewerProps = {
   path: string;
@@ -102,11 +103,14 @@ export function DiffViewer({ path, oldPath, type, oldContent = "", content = "",
       </div>
 
       {/* body */}
-      <div className="scroll-thin flex-1 overflow-y-auto">
+      <div className="scroll-thin flex-1 overflow-y-auto bg-editor">
         {isLoadingOriginal && (
-          <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-editor-border border-t-primary" />
-            <p className="mt-3 font-mono text-sm text-editor-muted">Loading original version...</p>
+          <div className="flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
+            <span className="grid size-10 place-items-center rounded-full border border-editor-border bg-editor-raised shadow-panel">
+              <Spinner size={20} className="border-editor-border" />
+            </span>
+            <p className="font-mono text-sm text-editor-muted">Loading original version…</p>
+            <p className="font-mono text-xs text-editor-muted">Fetching previous content from GitHub</p>
           </div>
         )}
         {originalError && !isLoadingOriginal && (
